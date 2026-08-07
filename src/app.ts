@@ -21,6 +21,7 @@ import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
 
 import { authRouter } from './api/routes/auth.js';
+import { conversationsRouter } from './api/routes/conversations.js';
 import { swaggerSpec } from './config/swagger.js';
 import { errorHandler, notFoundHandler } from './lib/errors.js';
 import { logger } from './lib/logger.js';
@@ -55,8 +56,9 @@ export function createApp() {
   // 请求日志：记录 method/url/状态码/耗时；Authorization 头已在 logger 中脱敏
   app.use(pinoHttp({ logger }));
 
-  // 业务路由：认证、健康检查（其余路由在后续步骤按 plan.md 添加）
+  // 业务路由：认证、个人对话（含标签）、健康检查（其余路由在后续步骤按 plan.md 添加）
   app.use('/api/auth', authRouter);
+  app.use('/api/conversations', conversationsRouter);
   app.use('/api/health', healthRouter);
 
   // 兜底：未匹配路由 → 404；全局错误 → 结构化错误响应

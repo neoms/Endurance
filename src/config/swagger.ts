@@ -138,6 +138,82 @@ const options: swaggerJsdoc.Options = {
             },
           },
         },
+        // 对话标签（对外输出）
+        ConversationTag: {
+          type: 'object',
+          required: ['id', 'name'],
+          properties: {
+            id: { type: 'string', description: '标签 id', example: 'cmxxxxxxx' },
+            name: { type: 'string', description: '标签名', example: '工作' },
+          },
+        },
+        // 个人对话（含标签列表）
+        Conversation: {
+          type: 'object',
+          required: ['id', 'title', 'createdAt', 'updatedAt', 'tags'],
+          properties: {
+            id: { type: 'string', description: '对话 id', example: 'cmxxxxxxx' },
+            title: { type: 'string', description: '对话标题', example: '学习计划' },
+            createdAt: { type: 'string', format: 'date-time', description: '创建时间' },
+            updatedAt: { type: 'string', format: 'date-time', description: '最近更新时间' },
+            tags: {
+              type: 'array',
+              description: '对话标签列表',
+              items: { $ref: '#/components/schemas/ConversationTag' },
+            },
+          },
+        },
+        // 创建对话请求体（标题可缺省）
+        CreateConversationRequest: {
+          type: 'object',
+          properties: {
+            title: {
+              type: 'string',
+              maxLength: 100,
+              description: '对话标题（可选，缺省时为「新对话」，首条消息会替换它）',
+              example: '学习计划',
+            },
+          },
+        },
+        // 修改对话标题请求体
+        UpdateConversationTitleRequest: {
+          type: 'object',
+          required: ['title'],
+          properties: {
+            title: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 100,
+              description: '新的对话标题',
+              example: '工作备忘',
+            },
+          },
+        },
+        // 添加标签请求体
+        AddTagRequest: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 30,
+              description: '标签名（按用户去重存储）',
+              example: '工作',
+            },
+          },
+        },
+        // 对话列表响应
+        ConversationList: {
+          type: 'object',
+          required: ['conversations'],
+          properties: {
+            conversations: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/Conversation' },
+            },
+          },
+        },
       },
     },
   },

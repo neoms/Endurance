@@ -31,3 +31,18 @@ export async function registerUser(app: Express, username: string) {
 export function auth(token: string) {
   return { Authorization: `Bearer ${token}` };
 }
+
+/**
+ * 创建个人对话
+ *
+ * @param app   Express 应用实例
+ * @param token JWT
+ * @param title 对话标题（可选，缺省时服务端使用默认标题）
+ * @returns supertest 响应（可通过 res.body.conversation 取结果）
+ */
+export async function createConversation(app: Express, token: string, title?: string) {
+  return request(app)
+    .post('/api/conversations')
+    .set(auth(token))
+    .send(title ? { title } : {});
+}

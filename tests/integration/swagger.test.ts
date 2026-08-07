@@ -24,6 +24,11 @@ describe('Swagger docs', () => {
     expect(res.body.paths['/api/auth/register']).toBeDefined();
     expect(res.body.paths['/api/auth/login']).toBeDefined();
     expect(res.body.paths['/api/auth/me']).toBeDefined();
+    // 对话与标签接口
+    expect(res.body.paths['/api/conversations']).toBeDefined();
+    expect(res.body.paths['/api/conversations/{id}']).toBeDefined();
+    expect(res.body.paths['/api/conversations/{id}/tags']).toBeDefined();
+    expect(res.body.paths['/api/conversations/{id}/tags/{tagId}']).toBeDefined();
   });
 
   it('serves the Swagger UI page', async () => {
