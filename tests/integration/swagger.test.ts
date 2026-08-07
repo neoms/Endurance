@@ -20,6 +20,10 @@ describe('Swagger docs', () => {
     expect(res.body.openapi).toBe('3.0.0');
     expect(res.body.paths['/api/health']).toBeDefined();
     expect(res.body.paths['/api/health'].get.summary).toBe('健康检查');
+    // 认证接口也必须出现在文档中（文档与实现一致性检查）
+    expect(res.body.paths['/api/auth/register']).toBeDefined();
+    expect(res.body.paths['/api/auth/login']).toBeDefined();
+    expect(res.body.paths['/api/auth/me']).toBeDefined();
   });
 
   it('serves the Swagger UI page', async () => {

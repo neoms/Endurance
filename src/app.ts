@@ -7,7 +7,7 @@
  * - 安全中间件（helmet）：设置 CSP 等安全响应头；
  * - 请求体解析（express.json）：支持 JSON 请求体并限制大小；
  * - 请求日志（pino-http）：每个请求输出一行结构化日志（含耗时），方便排查；
- * - 业务路由：当前仅健康检查，后续按 plan.md 依次追加认证/对话/消息/群组路由；
+ * - 业务路由：认证、健康检查；其余按 plan.md 后续添加；
  * - 兜底中间件：404 与全局错误处理必须最后挂载。
  *
  * 【挂载顺序说明】
@@ -20,6 +20,7 @@ import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
 
+import { authRouter } from './api/routes/auth.js';
 import { swaggerSpec } from './config/swagger.js';
 import { errorHandler, notFoundHandler } from './lib/errors.js';
 import { logger } from './lib/logger.js';
@@ -54,7 +55,8 @@ export function createApp() {
   // 请求日志：记录 method/url/状态码/耗时；Authorization 头已在 logger 中脱敏
   app.use(pinoHttp({ logger }));
 
-  // 业务路由：健康检查（其余路由在后续步骤按 plan.md 添加）
+  // 业务路由：认证、健康检查（其余路由在后续步骤按 plan.md 添加）
+  app.use('/api/auth', authRouter);
   app.use('/api/health', healthRouter);
 
   // 兜底：未匹配路由 → 404；全局错误 → 结构化错误响应

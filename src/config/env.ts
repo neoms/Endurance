@@ -8,7 +8,7 @@
  * 【设计说明】
  * - 使用 Zod schema 在进程启动阶段（模块加载时）完成校验，配置非法时快速失败（fail-fast）；
  * - `.env` 文件通过 `dotenv/config` 自动加载（仅当环境变量未设置时生效，不会覆盖已有值）；
- * - 生产环境请通过真实环境变量注入敏感配置（如后续的 JWT_SECRET），不要依赖默认值。
+ * - 生产环境请通过真实环境变量注入敏感配置（如 JWT_SECRET），不要依赖默认值。
  */
 import 'dotenv/config';
 
@@ -27,6 +27,10 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   // pino 日志级别：级别越低输出越详细，便于问题排查时临时调低
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  // JWT 签名密钥：生产环境必须注入足够长的随机值，此处仅为本地开发提供默认值
+  JWT_SECRET: z.string().min(16).default('dev-only-secret-do-not-use-in-production'),
+  // JWT 有效期（jsonwebtoken 时间字符串，例如 24h）
+  JWT_EXPIRES_IN: z.string().default('24h'),
 });
 
 // 由 Schema 推导出的环境变量类型（供全局引用）

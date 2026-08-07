@@ -3,7 +3,7 @@
  *
  * 【模块职责】
  * 基于 swagger-jsdoc 生成 OpenAPI 3.0 规范文档：
- * - 基础信息（标题/版本/描述）与全局组件（鉴权方案、通用错误响应模型）在此定义；
+ * - 基础信息（标题/版本/描述）与全局组件（鉴权方案、通用模型）在此定义；
  * - 每个接口的详细文档写在对应路由文件的 `@openapi` JSDoc 注释中（注释即文档），
  *   swagger-jsdoc 启动时会扫描这些文件并自动收集进规范；
  * - 生成结果通过 src/app.ts 挂载：`/api-docs`（可视化 UI）与 `/api-docs.json`（原始 JSON）。
@@ -27,9 +27,9 @@ const options: swaggerJsdoc.Options = {
         '类 ChatGPT 在线聊天应用 REST API 文档。接口注释即文档（swagger-jsdoc 自动收集），' +
         '请保持注释与实现一致。',
     },
-    // 服务地址：路径统一写全路径（如 /api/health）
+    // 服务地址：路径统一写全路径（如 /api/auth/register）
     servers: [{ url: '/', description: '本地开发服务' }],
-    // 全局组件：鉴权方案与通用错误响应模型
+    // 全局组件：鉴权方案与通用请求/响应模型
     components: {
       securitySchemes: {
         // Bearer JWT 鉴权：登录/注册接口返回 token，后续接口携带 Authorization: Bearer <token>
@@ -64,6 +64,77 @@ const options: swaggerJsdoc.Options = {
                   description: '可选的补充信息（如字段级校验问题列表）',
                 },
               },
+            },
+          },
+        },
+        // 公开用户信息（脱敏，不含密码哈希）
+        User: {
+          type: 'object',
+          required: ['id', 'username', 'displayName', 'createdAt'],
+          properties: {
+            id: { type: 'string', description: '用户 id', example: 'cmxxxxxxx' },
+            username: { type: 'string', description: '登录名', example: 'alice' },
+            displayName: { type: 'string', description: '展示昵称', example: 'Alice' },
+            createdAt: {
+              type: 'string',
+              format: 'date-time',
+              description: '注册时间',
+              example: '2026-08-07T08:57:35.176Z',
+            },
+          },
+        },
+        // 登录/注册成功响应：JWT + 用户信息
+        AuthResult: {
+          type: 'object',
+          required: ['token', 'user'],
+          properties: {
+            token: {
+              type: 'string',
+              description: 'JWT，后续请求头携带 Authorization: Bearer <token>',
+              example: 'eyJhbGciOiJIUzI1NiIs...',
+            },
+            user: { $ref: '#/components/schemas/User' },
+          },
+        },
+        // 注册请求体
+        RegisterRequest: {
+          type: 'object',
+          required: ['username', 'password'],
+          properties: {
+            username: {
+              type: 'string',
+              minLength: 3,
+              maxLength: 32,
+              description: '登录名（仅字母/数字/下划线）',
+              example: 'alice',
+            },
+            password: {
+              type: 'string',
+              format: 'password',
+              minLength: 8,
+              maxLength: 72,
+              description: '密码（8-72 位）',
+              example: 'alice123456',
+            },
+            displayName: {
+              type: 'string',
+              maxLength: 32,
+              description: '展示昵称（可选，缺省时取用户名）',
+              example: 'Alice',
+            },
+          },
+        },
+        // 登录请求体
+        LoginRequest: {
+          type: 'object',
+          required: ['username', 'password'],
+          properties: {
+            username: { type: 'string', description: '登录名', example: 'alice' },
+            password: {
+              type: 'string',
+              format: 'password',
+              description: '密码',
+              example: 'alice123456',
             },
           },
         },
