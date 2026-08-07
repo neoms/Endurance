@@ -21,6 +21,8 @@
  */
 import express from 'express';
 import helmet from 'helmet';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
 
@@ -65,10 +67,6 @@ export function createApp(options: AppOptions = {}) {
   app.get('/api-docs.json', (_req, res) => {
     res.json(swaggerSpec);
   });
-  // 根路径重定向到文档页，方便演示时直接访问
-  app.get('/', (_req, res) => {
-    res.redirect('/api-docs');
-  });
 
   // 安全响应头（CSP、X-Frame-Options、X-Content-Type-Options 等）
   app.use(helmet());
@@ -84,6 +82,25 @@ export function createApp(options: AppOptions = {}) {
   app.use('/api/bots', botsRouter);
   app.use('/api/messages', createMessagesRouter({ aiService }));
   app.use('/api/health', healthRouter);
+
+  // 前端静态资源：若 web/dist 已构建（npm run build:web），由 Express 托管，实现一体化部署
+  const webDist = path.resolve('web', 'dist');
+  if (existsSync(webDist)) {
+    app.use(express.static(webDist));
+    // SPA 回退：非 /api 的 GET 请求返回 index.html，支持前端路由刷新（如 /conversations/xxx）
+    app.use((req, res, next) => {
+      if (req.method === 'GET' && !req.path.startsWith('/api')) {
+        res.sendFile(path.join(webDist, 'index.html'));
+        return;
+      }
+      next();
+    });
+  } else {
+    // 未构建前端时，根路径重定向到接口文档页，方便演示
+    app.get('/', (_req, res) => {
+      res.redirect('/api-docs');
+    });
+  }
 
   // 兜底：未匹配路由 → 404；全局错误 → 结构化错误响应
   app.use(notFoundHandler);

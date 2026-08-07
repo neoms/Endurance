@@ -10,8 +10,11 @@
   "packageManager": "npm@11.6.2",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "dev:web": "npm --prefix web run dev",
     "build": "tsc -p tsconfig.build.json",
+    "build:web": "npm --prefix web run build",
     "start": "node dist/server.js",
+    "preview:web": "npm --prefix web run preview",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
