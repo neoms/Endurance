@@ -1,0 +1,4 @@
+plan/
+dist/
+coverage/
+node_modules/
