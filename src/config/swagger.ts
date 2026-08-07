@@ -294,6 +294,204 @@ const options: swaggerJsdoc.Options = {
             },
           },
         },
+        // 机器人角色预设（对外输出）
+        Bot: {
+          type: 'object',
+          required: ['id', 'code', 'name', 'personality'],
+          properties: {
+            id: { type: 'string', description: '机器人 id', example: 'cmxxxxxxx' },
+            code: { type: 'string', description: '稳定标识', example: 'customer-service' },
+            name: { type: 'string', description: '机器人名称', example: '客服机器人' },
+            personality: { type: 'string', description: '性格/回复倾向描述' },
+          },
+        },
+        // 群组成员（对外输出）
+        GroupMember: {
+          type: 'object',
+          required: ['userId', 'displayName', 'role', 'joinedAt'],
+          properties: {
+            userId: { type: 'string', description: '成员用户 id' },
+            displayName: { type: 'string', description: '成员昵称' },
+            role: {
+              type: 'string',
+              enum: ['OWNER', 'MEMBER'],
+              description: 'OWNER 创建者（可管理）/ MEMBER 普通成员',
+            },
+            joinedAt: { type: 'string', format: 'date-time', description: '加入时间' },
+          },
+        },
+        // 群组详情（对外输出）
+        Group: {
+          type: 'object',
+          required: [
+            'id',
+            'name',
+            'creatorId',
+            'responseMode',
+            'maxConsecutiveBotReplies',
+            'members',
+            'bots',
+          ],
+          properties: {
+            id: { type: 'string', description: '群组 id' },
+            name: { type: 'string', description: '群组名称' },
+            creatorId: { type: 'string', description: '创建者用户 id' },
+            responseMode: {
+              type: 'string',
+              enum: ['ALL_BOTS', 'RANDOM_ONE', 'CONTENT_ROUTED'],
+              description: '机器人响应策略',
+            },
+            maxConsecutiveBotReplies: {
+              type: 'integer',
+              description: '每轮机器人回复数上限（防循环）',
+              example: 3,
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+            members: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/GroupMember' },
+            },
+            bots: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/Bot' },
+            },
+          },
+        },
+        // 创建群组请求体
+        CreateGroupRequest: {
+          type: 'object',
+          required: ['name', 'botIds'],
+          properties: {
+            name: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 50,
+              description: '群组名称',
+              example: '技术讨论群',
+            },
+            botIds: {
+              type: 'array',
+              minItems: 1,
+              description: '初始机器人 id 列表（至少 1 个）',
+              items: { type: 'string', example: 'cmxxxxxxx' },
+            },
+            responseMode: {
+              type: 'string',
+              enum: ['ALL_BOTS', 'RANDOM_ONE', 'CONTENT_ROUTED'],
+              description: '响应策略（缺省 ALL_BOTS）',
+              default: 'ALL_BOTS',
+            },
+            maxConsecutiveBotReplies: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 10,
+              description: '每轮回复数上限（缺省 3）',
+              default: 3,
+            },
+          },
+        },
+        // 更新群组配置请求体
+        UpdateGroupRequest: {
+          type: 'object',
+          description: '至少提供一个字段',
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 50, description: '群组名称' },
+            responseMode: {
+              type: 'string',
+              enum: ['ALL_BOTS', 'RANDOM_ONE', 'CONTENT_ROUTED'],
+              description: '响应策略',
+            },
+            maxConsecutiveBotReplies: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 10,
+              description: '每轮回复数上限',
+            },
+          },
+        },
+        // 添加成员请求体
+        AddMemberRequest: {
+          type: 'object',
+          required: ['userId'],
+          properties: {
+            userId: { type: 'string', description: '待添加的用户 id' },
+          },
+        },
+        // 添加机器人请求体
+        AddBotRequest: {
+          type: 'object',
+          required: ['botId'],
+          properties: {
+            botId: { type: 'string', description: '机器人 id' },
+          },
+        },
+        // 群组消息（对外输出，含轮次标识）
+        GroupMessage: {
+          type: 'object',
+          required: ['id', 'groupId', 'roundId', 'senderType', 'content', 'status', 'createdAt'],
+          properties: {
+            id: { type: 'string', description: '消息 id' },
+            groupId: { type: 'string', description: '群组 id' },
+            roundId: {
+              type: 'string',
+              nullable: true,
+              description: '轮次 id：一条人类消息触发的一轮回复共享同一 roundId',
+            },
+            senderType: {
+              type: 'string',
+              enum: ['HUMAN', 'BOT'],
+              description: 'HUMAN 人类 / BOT 机器人',
+            },
+            userId: { type: 'string', nullable: true, description: '人类发言者 id' },
+            botId: { type: 'string', nullable: true, description: '机器人 id' },
+            content: { type: 'string', description: '消息内容' },
+            status: {
+              type: 'string',
+              enum: ['PENDING', 'SENT', 'FAILED'],
+              description: '消息状态',
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+        },
+        // 发送群组消息请求体
+        SendGroupMessageRequest: {
+          type: 'object',
+          required: ['content'],
+          properties: {
+            content: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 4000,
+              description: '消息内容（1-4000 字符）',
+              example: '谁能帮我看看这个 bug？',
+            },
+          },
+        },
+        // 发送群组消息响应：人类消息 + 本轮机器人回复
+        SendGroupMessageResult: {
+          type: 'object',
+          required: ['userMessage', 'botMessages'],
+          properties: {
+            userMessage: { $ref: '#/components/schemas/GroupMessage' },
+            botMessages: {
+              type: 'array',
+              description: '本轮机器人回复列表（受防循环上限约束）',
+              items: { $ref: '#/components/schemas/GroupMessage' },
+            },
+          },
+        },
+        // 群组消息列表响应
+        GroupMessageList: {
+          type: 'object',
+          required: ['messages'],
+          properties: {
+            messages: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/GroupMessage' },
+            },
+          },
+        },
       },
     },
   },

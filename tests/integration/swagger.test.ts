@@ -32,6 +32,16 @@ describe('Swagger docs', () => {
     // 消息接口
     expect(res.body.paths['/api/conversations/{id}/messages']).toBeDefined();
     expect(res.body.paths['/api/messages/{id}/retry']).toBeDefined();
+    // 群组与机器人接口
+    expect(res.body.paths['/api/groups']).toBeDefined();
+    expect(res.body.paths['/api/groups/{id}']).toBeDefined();
+    expect(res.body.paths['/api/groups/{id}/members']).toBeDefined();
+    expect(res.body.paths['/api/groups/{id}/members/me']).toBeDefined();
+    expect(res.body.paths['/api/groups/{id}/members/{userId}']).toBeDefined();
+    expect(res.body.paths['/api/groups/{id}/bots']).toBeDefined();
+    expect(res.body.paths['/api/groups/{id}/bots/{botId}']).toBeDefined();
+    expect(res.body.paths['/api/groups/{id}/messages']).toBeDefined();
+    expect(res.body.paths['/api/bots']).toBeDefined();
   });
 
   it('serves the Swagger UI page', async () => {

@@ -1,0 +1,341 @@
+/**
+ * 群组对话接口集成测试
+ *
+ * 覆盖：
+ * - 群组 CRUD 与权限矩阵（OWNER 管理 / MEMBER 发言 / 非成员 404）；
+ * - 成员管理：添加/移除/离开（创建者不可离开、不可被移除）；
+ * - 机器人管理：添加、移除（至少保留 1 个）；
+ * - 消息与机器人响应：ALL_BOTS / RANDOM_ONE / CONTENT_ROUTED / 无命中兜底；
+ * - 防循环：roundId 轮次隔离 + maxConsecutiveBotReplies 上限；
+ * - 兜底回复：AI 持续失败时机器人以兜底文案回复；
+ * - 历史消息与 ACL。
+ */
+import request from 'supertest';
+import { beforeEach, describe, expect, it } from 'vitest';
+
+import { createApp } from '../../src/app.js';
+import { prisma } from '../../src/lib/prisma.js';
+import { AiService } from '../../src/services/ai/ai.service.js';
+import { MockAiProvider } from '../../src/services/ai/mock.provider.js';
+import { auth, registerUser } from '../helpers.js';
+
+const app = createApp();
+// 故障应用：AI 必然失败，用于验证「保证机器人回复」的兜底逻辑
+const failingApp = createApp({ aiService: new AiService(new MockAiProvider({ failTimes: 99 })) });
+
+/**
+ * 读取测试库中的机器人 id（globalSetup 已写入种子机器人）
+ *
+ * @returns Promise<string[]> 机器人 id 列表
+ */
+async function getBotIds(): Promise<string[]> {
+  const bots = await prisma.bot.findMany({ select: { id: true } });
+  return bots.map((b) => b.id);
+}
+
+/**
+ * 创建群组
+ *
+ * @param token     JWT
+ * @param overrides 创建参数（botIds 必填）
+ * @returns supertest 响应
+ */
+function createGroup(token: string, overrides: Record<string, unknown>) {
+  return request(app).post('/api/groups').set(auth(token)).send(overrides);
+}
+
+describe('groups API', () => {
+  // 每个用例前清空用户表（级联清空其名下数据）；种子机器人保留
+  beforeEach(async () => {
+    await prisma.user.deleteMany();
+  });
+
+  it('creates a group with creator as OWNER and selected bots', async () => {
+    const { token, user } = await registerUser(app, 'groupowner');
+    const [botId] = await getBotIds();
+
+    const res = await createGroup(token, { name: '技术讨论群', botIds: [botId!] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.group.name).toBe('技术讨论群');
+    expect(res.body.group.creatorId).toBe(user.id);
+    expect(res.body.group.members).toHaveLength(1);
+    expect(res.body.group.members[0]).toMatchObject({ userId: user.id, role: 'OWNER' });
+    expect(res.body.group.bots).toHaveLength(1);
+  });
+
+  it('rejects unknown bot with 404 and missing botIds with 422', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+
+    const badBot = await createGroup(token, { name: 'g', botIds: ['not-a-real-bot'] });
+    const noBot = await createGroup(token, { name: 'g', botIds: [] });
+
+    expect(badBot.status).toBe(404);
+    expect(noBot.status).toBe(422);
+  });
+
+  it('lists only groups I participate in', async () => {
+    const owner = await registerUser(app, 'groupowner');
+    const outsider = await registerUser(app, 'outsider');
+    const [botId] = await getBotIds();
+    await createGroup(owner.token, { name: '我的群', botIds: [botId!] });
+
+    const mine = await request(app).get('/api/groups').set(auth(owner.token));
+    const others = await request(app).get('/api/groups').set(auth(outsider.token));
+
+    expect(mine.body.groups).toHaveLength(1);
+    expect(others.body.groups).toHaveLength(0);
+  });
+
+  it('enforces the permission matrix (owner can manage, member 403, non-member 404)', async () => {
+    const owner = await registerUser(app, 'groupowner');
+    const member = await registerUser(app, 'groupmember');
+    const outsider = await registerUser(app, 'outsider');
+    const [botId] = await getBotIds();
+    const created = await createGroup(owner.token, { name: 'g', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    const addRes = await request(app)
+      .post(`/api/groups/${groupId}/members`)
+      .set(auth(owner.token))
+      .send({ userId: member.user.id });
+    expect(addRes.status).toBe(200);
+
+    const memberPatch = await request(app)
+      .patch(`/api/groups/${groupId}`)
+      .set(auth(member.token))
+      .send({ name: 'hacked' });
+    expect(memberPatch.status).toBe(403);
+
+    const outsiderGet = await request(app).get(`/api/groups/${groupId}`).set(auth(outsider.token));
+    expect(outsiderGet.status).toBe(404);
+
+    const msg = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(member.token))
+      .send({ content: '大家好' });
+    expect(msg.status).toBe(201);
+  });
+
+  it('manages members: duplicate 409, unknown target 404, cannot remove creator', async () => {
+    const owner = await registerUser(app, 'groupowner');
+    const member = await registerUser(app, 'groupmember');
+    const [botId] = await getBotIds();
+    const created = await createGroup(owner.token, { name: 'g', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    const added = await request(app)
+      .post(`/api/groups/${groupId}/members`)
+      .set(auth(owner.token))
+      .send({ userId: member.user.id });
+    expect(added.status).toBe(200);
+
+    const duplicate = await request(app)
+      .post(`/api/groups/${groupId}/members`)
+      .set(auth(owner.token))
+      .send({ userId: member.user.id });
+    expect(duplicate.status).toBe(409);
+
+    const unknown = await request(app)
+      .post(`/api/groups/${groupId}/members`)
+      .set(auth(owner.token))
+      .send({ userId: 'not-a-real-user' });
+    expect(unknown.status).toBe(404);
+
+    const removeCreator = await request(app)
+      .delete(`/api/groups/${groupId}/members/${owner.user.id}`)
+      .set(auth(owner.token));
+    expect(removeCreator.status).toBe(403);
+
+    const removeMember = await request(app)
+      .delete(`/api/groups/${groupId}/members/${member.user.id}`)
+      .set(auth(owner.token));
+    expect(removeMember.status).toBe(200);
+  });
+
+  it('allows members to leave but not the creator', async () => {
+    const owner = await registerUser(app, 'groupowner');
+    const member = await registerUser(app, 'groupmember');
+    const [botId] = await getBotIds();
+    const created = await createGroup(owner.token, { name: 'g', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+    await request(app)
+      .post(`/api/groups/${groupId}/members`)
+      .set(auth(owner.token))
+      .send({ userId: member.user.id });
+
+    const ownerLeave = await request(app)
+      .delete(`/api/groups/${groupId}/members/me`)
+      .set(auth(owner.token));
+    expect(ownerLeave.status).toBe(403);
+
+    const memberLeave = await request(app)
+      .delete(`/api/groups/${groupId}/members/me`)
+      .set(auth(member.token));
+    expect(memberLeave.status).toBe(204);
+  });
+
+  it('manages bots: add works, last bot cannot be removed', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botA, botB] = await getBotIds();
+    const created = await createGroup(token, { name: 'g', botIds: [botA!] });
+    const groupId = created.body.group.id as string;
+
+    const addRes = await request(app)
+      .post(`/api/groups/${groupId}/bots`)
+      .set(auth(token))
+      .send({ botId: botB! });
+    expect(addRes.status).toBe(200);
+    expect(addRes.body.group.bots).toHaveLength(2);
+
+    const removeOne = await request(app)
+      .delete(`/api/groups/${groupId}/bots/${botA}`)
+      .set(auth(token));
+    expect(removeOne.status).toBe(200);
+
+    const removeLast = await request(app)
+      .delete(`/api/groups/${groupId}/bots/${botB}`)
+      .set(auth(token));
+    expect(removeLast.status).toBe(409);
+    expect(removeLast.body.error.code).toBe('LAST_BOT');
+  });
+
+  it('ALL_BOTS: every bot replies in the same round', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botA, botB] = await getBotIds();
+    const created = await createGroup(token, { name: 'g', botIds: [botA!, botB!] });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '大家好' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.userMessage.senderType).toBe('HUMAN');
+    expect(res.body.botMessages).toHaveLength(2);
+    expect(res.body.botMessages.every((m: { senderType: string }) => m.senderType === 'BOT')).toBe(
+      true,
+    );
+    expect(
+      res.body.botMessages.every(
+        (m: { roundId: string }) => m.roundId === res.body.userMessage.roundId,
+      ),
+    ).toBe(true);
+  });
+
+  it('RANDOM_ONE: exactly one bot replies', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botA, botB] = await getBotIds();
+    const created = await createGroup(token, {
+      name: 'g',
+      botIds: [botA!, botB!],
+      responseMode: 'RANDOM_ONE',
+    });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '随机一个' });
+
+    expect(res.body.botMessages).toHaveLength(1);
+  });
+
+  it('CONTENT_ROUTED: keyword matching and fallback when nothing matches', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const bots = await prisma.bot.findMany({ select: { id: true, code: true } });
+    const tech = bots.find((b) => b.code === 'tech');
+    const humor = bots.find((b) => b.code === 'humor');
+    expect(tech).toBeDefined();
+    expect(humor).toBeDefined();
+
+    const created = await createGroup(token, {
+      name: 'g',
+      botIds: [tech!.id, humor!.id],
+      responseMode: 'CONTENT_ROUTED',
+    });
+    const groupId = created.body.group.id as string;
+
+    const hit = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '这个 bug 怎么修' });
+    expect(hit.body.botMessages).toHaveLength(1);
+    const repliedBot = await prisma.bot.findUnique({
+      where: { id: hit.body.botMessages[0].botId },
+    });
+    expect(repliedBot?.code).toBe('tech');
+
+    const miss = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '今天天气真好' });
+    expect(miss.body.botMessages).toHaveLength(1);
+  });
+
+  it('prevents bot loops: bot replies never trigger new rounds and max cap applies', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botA, botB, botC] = await getBotIds();
+    // maxConsecutiveBotReplies=2：即使群组有 3 个机器人，每轮最多 2 条回复
+    const created = await createGroup(token, {
+      name: 'g',
+      botIds: [botA!, botB!, botC!],
+      maxConsecutiveBotReplies: 2,
+    });
+    const groupId = created.body.group.id as string;
+
+    const first = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '第一轮' });
+    expect(first.body.botMessages).toHaveLength(2);
+
+    const second = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '第二轮' });
+    expect(second.body.botMessages).toHaveLength(2);
+    expect(second.body.userMessage.roundId).not.toBe(first.body.userMessage.roundId);
+
+    const history = await request(app).get(`/api/groups/${groupId}/messages`).set(auth(token));
+    expect(history.body.messages).toHaveLength(6); // HUMAN+BOT+BOT × 2 轮
+  });
+
+  it('guarantees a reply with fallback text when AI keeps failing', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botA, botB] = await getBotIds();
+    const created = await createGroup(token, { name: 'g', botIds: [botA!, botB!] });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(failingApp)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '这条会失败' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.botMessages).toHaveLength(2);
+    expect(
+      res.body.botMessages.every((m: { content: string }) => m.content.includes('我暂时无法回答')),
+    ).toBe(true);
+  });
+
+  it('prevents non-members from sending or reading messages (404)', async () => {
+    const owner = await registerUser(app, 'groupowner');
+    const outsider = await registerUser(app, 'outsider');
+    const [botId] = await getBotIds();
+    const created = await createGroup(owner.token, { name: 'g', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    const sendRes = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(outsider.token))
+      .send({ content: '越权' });
+    const listRes = await request(app)
+      .get(`/api/groups/${groupId}/messages`)
+      .set(auth(outsider.token));
+
+    expect(sendRes.status).toBe(404);
+    expect(listRes.status).toBe(404);
+  });
+});

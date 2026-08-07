@@ -7,12 +7,12 @@
  * - 安全中间件（helmet）：设置 CSP 等安全响应头；
  * - 请求体解析（express.json）：支持 JSON 请求体并限制大小；
  * - 请求日志（pino-http）：每个请求输出一行结构化日志（含耗时），方便排查；
- * - 业务路由：认证、个人对话（含标签与消息）、AI 消息重试、健康检查；
+ * - 业务路由：认证、个人对话（含标签与消息）、群组、机器人、AI 消息重试、健康检查；
  * - 兜底中间件：404 与全局错误处理必须最后挂载。
  *
  * 【依赖注入】
  * AppOptions.aiService 可注入自定义 AI 服务；测试用它注入「必然失败」的
- * Provider 验证 AI 失败一致性逻辑。默认使用 MockAiProvider。
+ * Provider 验证 AI 失败一致性与群组兜底回复逻辑。默认使用 MockAiProvider。
  *
  * 【挂载顺序说明】
  * Swagger UI 依赖内联脚本，而 helmet 默认 CSP 禁止内联脚本；
@@ -25,7 +25,9 @@ import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
 
 import { authRouter } from './api/routes/auth.js';
+import { botsRouter } from './api/routes/bots.js';
 import { createConversationsRouter } from './api/routes/conversations.js';
+import { createGroupsRouter } from './api/routes/groups.js';
 import { createMessagesRouter } from './api/routes/messages.js';
 import { swaggerSpec } from './config/swagger.js';
 import { errorHandler, notFoundHandler } from './lib/errors.js';
@@ -75,9 +77,11 @@ export function createApp(options: AppOptions = {}) {
   // 请求日志：记录 method/url/状态码/耗时；Authorization 头已在 logger 中脱敏
   app.use(pinoHttp({ logger }));
 
-  // 业务路由：认证、个人对话（含标签与消息）、AI 消息重试、健康检查
+  // 业务路由：认证、个人对话、群组、机器人、AI 消息重试、健康检查
   app.use('/api/auth', authRouter);
   app.use('/api/conversations', createConversationsRouter({ aiService }));
+  app.use('/api/groups', createGroupsRouter({ aiService }));
+  app.use('/api/bots', botsRouter);
   app.use('/api/messages', createMessagesRouter({ aiService }));
   app.use('/api/health', healthRouter);
 

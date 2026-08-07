@@ -26,4 +26,12 @@ export default function globalSetup() {
     env: { ...process.env, DATABASE_URL: 'file:./test.db' },
     stdio: 'inherit',
   });
+
+  // 写入种子数据（测试账号与机器人角色），保证群组测试可用机器人预设
+  const tsxBin = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+  execSync(`${tsxBin} prisma/seed.ts`, {
+    cwd: process.cwd(),
+    env: { ...process.env, DATABASE_URL: 'file:./test.db' },
+    stdio: 'inherit',
+  });
 }
