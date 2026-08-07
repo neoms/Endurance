@@ -4,6 +4,8 @@ coverage/
 .env
 .env.*
 !.env.example
+*.db
+*.db-journal
 *.log
 .DS_Store
 web/dist/

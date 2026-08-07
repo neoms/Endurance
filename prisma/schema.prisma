@@ -1,0 +1,235 @@
+// ============================================================================
+// Prisma Schema（数据库模型定义，SQLite）
+// ============================================================================
+// 【设计要点】
+// 1. 数据隔离：所有用户数据（对话/标签/消息/群组）都通过 userId 与 User 关联，
+//    任何查询都必须携带 userId 条件，从数据库层面杜绝跨用户访问。
+// 2. 对话标签：采用「规范化标签表 + 关联表」两级结构——
+//    - tags 表按「用户 + 名称」唯一，同名标签不重复存储；
+//    - conversation_tags 关联表以 (conversationId, tagId) 为复合主键，
+//      配合 tagId 索引支撑高效的多标签 AND 筛选。
+// 3. AI 失败一致性：messages / group_messages 携带 status、errorCode、errorMessage，
+//    AI 调用重试耗尽后以 FAILED 状态占位，用户消息不丢失，前端可展示并重试。
+// 4. 群组防循环：group_messages.roundId 表示「一条人类消息触发的一轮机器人回复」，
+//    配合 groups.maxConsecutiveBotReplies 实现轮次内回复数硬上限。
+// ============================================================================
+
+// Prisma Client 生成器：生成经典 @prisma/client 客户端
+generator client {
+  provider = "prisma-client-js"
+}
+
+// 数据源：SQLite，连接串来自环境变量 DATABASE_URL（相对 prisma/ 目录解析）
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// 用户
+// ----------------------------------------------------------------------------
+model User {
+  id           String   @id @default(cuid()) // 主键（cuid 全局唯一）
+  username     String   @unique // 登录名（服务层统一小写存储，避免大小写变体重复）
+  passwordHash String // bcrypt 哈希，绝不保存明文密码
+  displayName  String // 展示昵称
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // 反向关系（用于 Prisma 关联查询）
+  conversations Conversation[]
+  tags          Tag[]
+  groupsCreated ChatGroup[]       @relation("GroupCreator")
+  groupMembers  GroupMember[]
+  groupMessages GroupMessage[]
+  messages      Message[]        @relation("MessageAuthor")
+
+  @@map("users")
+}
+
+// ----------------------------------------------------------------------------
+// 个人对话
+// ----------------------------------------------------------------------------
+model Conversation {
+  id        String   @id @default(cuid())
+  userId    String // 所属用户（ACL 关键字段）
+  title     String // 标题：创建时默认「新对话」，首条用户消息会替换它
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt // 对话列表按此字段倒序
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+  tags     ConversationTag[]
+
+  // 加速「我的对话」列表查询（按用户 + 最近更新时间排序）
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("conversations")
+}
+
+// ----------------------------------------------------------------------------
+// 标签（规范化标签表 + 关联表）
+// ----------------------------------------------------------------------------
+model Tag {
+  id     String @id @default(cuid())
+  userId String // 标签归属用户：同一用户下标签名唯一
+  name   String
+
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversations ConversationTag[]
+
+  // 同一用户下标签名唯一（规范化存储，避免重复行）
+  @@unique([userId, name])
+  @@map("tags")
+}
+
+model ConversationTag {
+  conversationId String
+  tagId          String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  tag          Tag          @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  // 复合主键：同一对话不能重复关联同一标签；tagId 索引加速按标签筛选
+  @@id([conversationId, tagId])
+  @@index([tagId])
+  @@map("conversation_tags")
+}
+
+// ----------------------------------------------------------------------------
+// 消息（个人对话）
+// ----------------------------------------------------------------------------
+
+// 消息发送者类型
+enum SenderType {
+  HUMAN // 人类用户
+  BOT // 机器人
+}
+
+// 消息状态（用于 AI 失败一致性）
+enum MessageStatus {
+  PENDING // 生成中（预留状态）
+  SENT // 已成功落库
+  FAILED // AI 调用重试后仍失败（占位 + 错误信息，前端可重试）
+}
+
+model Message {
+  id              String        @id @default(cuid())
+  conversationId  String
+  senderType      SenderType // HUMAN / BOT
+  senderUserId    String? // 人类消息的作者；机器人消息为 null
+  content         String
+  status          MessageStatus @default(SENT)
+  errorCode       String? // AI 失败错误码（如 AI_TIMEOUT / AI_UNAVAILABLE）
+  errorMessage    String?
+  clientRequestId String?       @unique // 幂等键：防止客户端重复提交产生重复消息
+  createdAt       DateTime      @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderUser   User?        @relation("MessageAuthor", fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  // 历史消息按时间顺序查询的索引
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// ----------------------------------------------------------------------------
+// 机器人角色预设
+// ----------------------------------------------------------------------------
+model Bot {
+  id            String   @id @default(cuid())
+  code          String   @unique // 稳定标识（如 customer-service），用于种子去重与路由
+  name          String
+  personality   String // 性格/回复倾向描述（如「耐心、礼貌」）
+  replyTendency String // 关键词（逗号分隔），用于 CONTENT_ROUTED 内容路由
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  groupBots     GroupBot[]
+  groupMessages GroupMessage[]
+
+  @@map("bots")
+}
+
+// ----------------------------------------------------------------------------
+// 群组对话
+// ----------------------------------------------------------------------------
+
+// 群组机器人响应策略
+enum GroupResponseMode {
+  ALL_BOTS // 所有启用机器人回复
+  RANDOM_ONE // 随机一个机器人回复
+  CONTENT_ROUTED // 按消息内容关键词路由到特定机器人
+}
+
+// 群组成员角色
+enum MemberRole {
+  OWNER // 创建者（可管理成员与机器人）
+  MEMBER // 普通成员
+}
+
+model ChatGroup {
+  id                       String             @id @default(cuid())
+  name                     String
+  creatorId                String // 创建者（OWNER）
+  responseMode             GroupResponseMode  @default(ALL_BOTS)
+  maxConsecutiveBotReplies Int                @default(3) // 防循环：每轮机器人回复数上限
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
+
+  creator  User           @relation("GroupCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  members  GroupMember[]
+  bots     GroupBot[]
+  messages GroupMessage[]
+
+  @@index([creatorId])
+  @@map("groups")
+}
+
+model GroupMember {
+  groupId  String
+  userId   String
+  role     MemberRole @default(MEMBER)
+  joinedAt DateTime   @default(now())
+
+  group ChatGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@index([userId]) // 加速「我参与的群组」查询
+  @@map("group_members")
+}
+
+model GroupBot {
+  groupId String
+  botId   String
+  addedAt DateTime @default(now())
+
+  group ChatGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  bot   Bot       @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, botId])
+  @@index([botId])
+  @@map("group_bots")
+}
+
+model GroupMessage {
+  id         String        @id @default(cuid())
+  groupId    String
+  roundId    String? // 轮次：一条人类消息触发的一轮回复共享同一 roundId，用于防循环计数与按轮聚合
+  senderType SenderType
+  userId     String?
+  botId      String?
+  content    String
+  status     MessageStatus @default(SENT)
+  createdAt  DateTime      @default(now())
+
+  group ChatGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  bot   Bot?      @relation(fields: [botId], references: [id], onDelete: SetNull)
+
+  // 群组历史消息按时间顺序查询；roundId 索引支撑按轮查询
+  @@index([groupId, createdAt])
+  @@index([groupId, roundId])
+  @@map("group_messages")
+}

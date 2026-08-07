@@ -14,5 +14,5 @@
     "noEmit": true,
     "sourceMap": true
   },
-  "include": ["src", "tests", "vitest.config.ts"]
+  "include": ["src", "tests", "prisma", "vitest.config.ts"]
 }
