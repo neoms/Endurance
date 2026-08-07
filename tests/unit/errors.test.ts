@@ -1,3 +1,10 @@
+/**
+ * 全局错误处理单元测试
+ *
+ * 验证 errorHandler 对 AppError（业务错误）与未知错误的响应映射：
+ * - AppError → 对应状态码与错误码；
+ * - 未知错误 → 500 且不泄露内部细节。
+ */
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';

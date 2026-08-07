@@ -1,3 +1,8 @@
+/**
+ * 健康检查接口集成测试
+ *
+ * 验证 GET /api/health 返回 200 与 { status: 'ok', uptime: number }。
+ */
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 
