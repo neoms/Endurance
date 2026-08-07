@@ -214,6 +214,86 @@ const options: swaggerJsdoc.Options = {
             },
           },
         },
+        // 消息（对外输出，含状态与 AI 错误信息）
+        Message: {
+          type: 'object',
+          required: ['id', 'senderType', 'senderUserId', 'content', 'status', 'createdAt'],
+          properties: {
+            id: { type: 'string', description: '消息 id', example: 'cmxxxxxxx' },
+            senderType: {
+              type: 'string',
+              enum: ['HUMAN', 'BOT'],
+              description: '发送者类型：HUMAN 人类 / BOT 机器人',
+            },
+            senderUserId: {
+              type: 'string',
+              nullable: true,
+              description: '人类消息的作者 id；机器人消息为 null',
+            },
+            content: { type: 'string', description: '消息内容（AI 失败时为空串）' },
+            status: {
+              type: 'string',
+              enum: ['PENDING', 'SENT', 'FAILED'],
+              description: '消息状态：FAILED 表示 AI 重试后仍失败',
+            },
+            errorCode: {
+              type: 'string',
+              nullable: true,
+              description: 'AI 失败错误码（如 AI_TIMEOUT / AI_UNAVAILABLE）',
+            },
+            errorMessage: {
+              type: 'string',
+              nullable: true,
+              description: 'AI 失败错误描述',
+            },
+            createdAt: { type: 'string', format: 'date-time', description: '发送时间' },
+          },
+        },
+        // 发送消息请求体
+        SendMessageRequest: {
+          type: 'object',
+          required: ['content'],
+          properties: {
+            content: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 4000,
+              description: '消息内容（1-4000 字符）',
+              example: '你好，请帮我制定一个学习计划',
+            },
+            clientRequestId: {
+              type: 'string',
+              minLength: 8,
+              maxLength: 64,
+              description: '幂等键（可选）：相同键重复提交不会产生重复消息',
+              example: 'req-00000001',
+            },
+          },
+        },
+        // 发送消息响应：用户消息 + AI 回复
+        SendMessageResult: {
+          type: 'object',
+          required: ['userMessage', 'aiMessage'],
+          properties: {
+            userMessage: { $ref: '#/components/schemas/Message' },
+            aiMessage: {
+              allOf: [{ $ref: '#/components/schemas/Message' }],
+              nullable: true,
+              description: 'AI 回复（同步流程下必有；失败时为 FAILED 状态）',
+            },
+          },
+        },
+        // 消息列表响应
+        MessageList: {
+          type: 'object',
+          required: ['messages'],
+          properties: {
+            messages: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/Message' },
+            },
+          },
+        },
       },
     },
   },

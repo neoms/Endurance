@@ -7,8 +7,12 @@
  * - 安全中间件（helmet）：设置 CSP 等安全响应头；
  * - 请求体解析（express.json）：支持 JSON 请求体并限制大小；
  * - 请求日志（pino-http）：每个请求输出一行结构化日志（含耗时），方便排查；
- * - 业务路由：认证、健康检查；其余按 plan.md 后续添加；
+ * - 业务路由：认证、个人对话（含标签与消息）、AI 消息重试、健康检查；
  * - 兜底中间件：404 与全局错误处理必须最后挂载。
+ *
+ * 【依赖注入】
+ * AppOptions.aiService 可注入自定义 AI 服务；测试用它注入「必然失败」的
+ * Provider 验证 AI 失败一致性逻辑。默认使用 MockAiProvider。
  *
  * 【挂载顺序说明】
  * Swagger UI 依赖内联脚本，而 helmet 默认 CSP 禁止内联脚本；
@@ -21,18 +25,33 @@ import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
 
 import { authRouter } from './api/routes/auth.js';
-import { conversationsRouter } from './api/routes/conversations.js';
+import { createConversationsRouter } from './api/routes/conversations.js';
+import { createMessagesRouter } from './api/routes/messages.js';
 import { swaggerSpec } from './config/swagger.js';
 import { errorHandler, notFoundHandler } from './lib/errors.js';
 import { logger } from './lib/logger.js';
 import { healthRouter } from './routes/health.js';
+import { AiService } from './services/ai/ai.service.js';
+import { MockAiProvider } from './services/ai/mock.provider.js';
+
+/**
+ * 应用构建选项
+ *
+ * @property aiService 可选的 AI 服务（默认 MockAiProvider），测试可注入故障实现
+ */
+export interface AppOptions {
+  aiService?: AiService;
+}
 
 /**
  * 创建并配置 Express 应用
  *
+ * @param options 构建选项（依赖注入）
  * @returns 配置完成的 Express 应用实例（尚未监听端口，监听由 src/server.ts 负责）
  */
-export function createApp() {
+export function createApp(options: AppOptions = {}) {
+  // 默认使用 Mock AI Provider；测试可注入自定义实现
+  const aiService = options.aiService ?? new AiService(new MockAiProvider());
   const app = express();
 
   // 隐藏 X-Powered-By 响应头，降低技术栈信息泄露
@@ -56,9 +75,10 @@ export function createApp() {
   // 请求日志：记录 method/url/状态码/耗时；Authorization 头已在 logger 中脱敏
   app.use(pinoHttp({ logger }));
 
-  // 业务路由：认证、个人对话（含标签）、健康检查（其余路由在后续步骤按 plan.md 添加）
+  // 业务路由：认证、个人对话（含标签与消息）、AI 消息重试、健康检查
   app.use('/api/auth', authRouter);
-  app.use('/api/conversations', conversationsRouter);
+  app.use('/api/conversations', createConversationsRouter({ aiService }));
+  app.use('/api/messages', createMessagesRouter({ aiService }));
   app.use('/api/health', healthRouter);
 
   // 兜底：未匹配路由 → 404；全局错误 → 结构化错误响应

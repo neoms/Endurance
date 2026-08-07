@@ -29,6 +29,9 @@ describe('Swagger docs', () => {
     expect(res.body.paths['/api/conversations/{id}']).toBeDefined();
     expect(res.body.paths['/api/conversations/{id}/tags']).toBeDefined();
     expect(res.body.paths['/api/conversations/{id}/tags/{tagId}']).toBeDefined();
+    // 消息接口
+    expect(res.body.paths['/api/conversations/{id}/messages']).toBeDefined();
+    expect(res.body.paths['/api/messages/{id}/retry']).toBeDefined();
   });
 
   it('serves the Swagger UI page', async () => {
