@@ -74,3 +74,10 @@ export interface SendGroupMessageResult {
   userMessage: GroupMessageOutput;
   botMessages: GroupMessageOutput[];
 }
+
+// 发送群组消息入参
+export interface SendGroupMessageInput {
+  content: string;
+  /** 幂等键（可选，8-64 字符）：同一群组内相同键重复提交直接返回首次轮次结果 */
+  clientRequestId?: string;
+}

@@ -222,15 +222,16 @@ model GroupBot {
 }
 
 model GroupMessage {
-  id         String        @id @default(cuid())
-  groupId    String
-  roundId    String? // 轮次：一条人类消息触发的一轮回复共享同一 roundId，用于防循环计数与按轮聚合
-  senderType SenderType
-  userId     String?
-  botId      String?
-  content    String
-  status     MessageStatus @default(SENT)
-  createdAt  DateTime      @default(now())
+  id              String        @id @default(cuid())
+  groupId         String
+  roundId         String? // 轮次：一条人类消息触发的一轮回复共享同一 roundId，用于防循环计数与按轮聚合
+  senderType      SenderType
+  userId          String?
+  botId           String?
+  content         String
+  status          MessageStatus @default(SENT)
+  clientRequestId String? // 幂等键：同一群组内唯一，防止客户端重复提交产生重复消息
+  createdAt       DateTime      @default(now())
 
   group ChatGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
   user  User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
@@ -239,5 +240,7 @@ model GroupMessage {
   // 群组历史消息按时间顺序查询；roundId 索引支撑按轮查询
   @@index([groupId, createdAt])
   @@index([groupId, roundId])
+  // 幂等键复合唯一约束：限定在「同一群组」内（与个人对话消息的幂等设计一致）
+  @@unique([groupId, clientRequestId])
   @@map("group_messages")
 }

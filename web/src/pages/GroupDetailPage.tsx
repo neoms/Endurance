@@ -29,6 +29,9 @@ export default function GroupDetailPage() {
   const [addUserId, setAddUserId] = useState('');
   const [addBotId, setAddBotId] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
+  // 当前待发送消息的幂等键：发送失败后保留，重试同一条消息时后端去重；
+  // 发送成功或用户修改输入后清空（幂等键只对同一条消息有效）
+  const requestIdRef = useRef<string | null>(null);
 
   const isOwner = user !== null && group?.creatorId === user.id;
 
@@ -103,14 +106,19 @@ export default function GroupDetailPage() {
     if (!id || !input.trim() || sending) return;
     setSending(true);
     setError('');
+    // 失败重试复用同一幂等键（后端返回首次轮次结果）；首次发送生成新键
+    const requestId = requestIdRef.current ?? crypto.randomUUID();
+    requestIdRef.current = requestId;
     try {
       const result = await api<SendGroupMessageResult>(`/groups/${id}/messages`, {
         method: 'POST',
-        body: { content: input.trim() },
+        body: { content: input.trim(), clientRequestId: requestId },
       });
       setMessages((prev) => [...prev, result.userMessage, ...result.botMessages]);
       setInput('');
+      requestIdRef.current = null;
     } catch (err) {
+      // 保留幂等键：用户重试同一条消息时不会产生重复消息
       setError(err instanceof ApiError ? err.message : '发送失败');
     } finally {
       setSending(false);
@@ -279,7 +287,11 @@ export default function GroupDetailPage() {
           <form className="chat-input" onSubmit={(e) => void send(e)}>
             <textarea
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                // 输入内容变化 → 清空幂等键（新内容必须使用新键）
+                requestIdRef.current = null;
+              }}
               placeholder="发送消息，机器人将按策略回复…"
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {

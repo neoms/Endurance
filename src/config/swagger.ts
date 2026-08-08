@@ -468,6 +468,15 @@ const options: swaggerJsdoc.Options = {
               description: '消息内容（1-4000 字符）',
               example: '谁能帮我看看这个 bug？',
             },
+            clientRequestId: {
+              type: 'string',
+              minLength: 8,
+              maxLength: 64,
+              description:
+                '幂等键（可选）：同一群组内相同键重复提交不会产生重复消息；' +
+                '并发/重试时重复请求直接返回首次轮次结果',
+              example: 'req-00000001',
+            },
           },
         },
         // 发送群组消息响应：人类消息 + 本轮机器人回复

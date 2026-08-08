@@ -59,4 +59,5 @@ export const sendGroupMessageSchema = z.object({
     .trim()
     .min(1, 'Message must not be empty')
     .max(4000, 'Message must be at most 4000 characters'),
+  clientRequestId: z.string().trim().min(8).max(64).optional(),
 });

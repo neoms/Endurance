@@ -16,7 +16,11 @@
  *   2. 轮次硬上限：每轮回复数 ≤ maxConsecutiveBotReplies；
  *   3. 串行化：同一群组一次只有一个生成轮次（in-flight 锁），避免并发竞态。
  * - 保证回复：某机器人生成失败时以兜底文案占位；群组始终至少保留 1 个机器人，
- *   且 CONTENT_ROUTED 无命中时也会选一个机器人，保证人类消息后必有回复。
+ *   且 CONTENT_ROUTED 无命中时也会选一个机器人，保证人类消息后必有回复；
+ * - 防御：群组内没有「启用」机器人时拒绝发送（409 NO_ACTIVE_BOT），
+ *   绝不静默返回零回复破坏「保证回复」契约；
+ * - 幂等：群组消息支持 clientRequestId（同一群组内唯一），
+ *   并发/重试重复提交直接返回首次轮次结果，不产生重复消息。
  */
 import {
   GroupResponseMode,
@@ -204,10 +208,12 @@ function toGroupMessageOutput(message: GroupMessage): GroupMessageOutput {
  * 事务内完成：建群 → 创建者成员 → 关联机器人。
  */
 export async function createGroup(userId: string, input: CreateGroupInput): Promise<GroupOutput> {
+  // botIds 去重：重复 id（如 [A, A]）按单个机器人处理，避免 404 语义不准或撞复合主键
+  const uniqueBotIds = [...new Set(input.botIds)];
   const bots = await prisma.bot.findMany({
-    where: { id: { in: input.botIds }, isActive: true },
+    where: { id: { in: uniqueBotIds }, isActive: true },
   });
-  if (bots.length !== input.botIds.length) {
+  if (bots.length !== uniqueBotIds.length) {
     throw new AppError(404, 'BOT_NOT_FOUND', 'One or more bots not found');
   }
 
@@ -224,7 +230,7 @@ export async function createGroup(userId: string, input: CreateGroupInput): Prom
       data: { groupId: created.id, userId, role: MemberRole.OWNER },
     });
     await tx.groupBot.createMany({
-      data: input.botIds.map((botId) => ({ groupId: created.id, botId })),
+      data: uniqueBotIds.map((botId) => ({ groupId: created.id, botId })),
     });
     return created;
   });
@@ -442,9 +448,13 @@ export async function removeBotFromGroup(
   if (!existing) {
     throw new AppError(404, 'BOT_NOT_FOUND', 'Bot is not in this group');
   }
-  const botCount = await prisma.groupBot.count({ where: { groupId } });
-  if (botCount <= 1) {
-    throw new AppError(409, 'LAST_BOT', 'A group must keep at least one bot');
+  // 移除后必须仍至少有一个「启用」的机器人（保证人类消息后必有回复）。
+  // 注意按启用状态计算：若剩余机器人全被停用，同样视为不可移除。
+  const remainingActive = await prisma.groupBot.count({
+    where: { groupId, botId: { not: botId }, bot: { isActive: true } },
+  });
+  if (remainingActive === 0) {
+    throw new AppError(409, 'LAST_BOT', 'A group must keep at least one active bot');
   }
   await prisma.groupBot.delete({ where: { groupId_botId: { groupId, botId } } });
   logger.info({ userId, groupId, botId }, 'group: bot removed');
@@ -477,22 +487,25 @@ async function buildGroupHistory(
  * @param aiService AI 服务
  * @param userId    当前用户 id（须是群组成员）
  * @param groupId   目标群组 id
- * @param input     { content }
+ * @param input     { content, clientRequestId? }
  * @returns Promise<SendGroupMessageResult> 人类消息 + 本轮机器人回复列表
  * @throws AppError(404) 群组不存在或当前用户不是成员
+ * @throws AppError(409 NO_ACTIVE_BOT) 群组内没有启用状态的机器人
  *
  * 主要逻辑（在群组锁内执行）：
- * 1. 生成 roundId，人类消息落库；
- * 2. 按响应策略选择机器人（CONTENT_ROUTED 无命中时随机兜底）；
- * 3. 每轮回复数受 maxConsecutiveBotReplies 限制（防循环硬上限）；
- * 4. 逐个机器人生成回复；生成失败以兜底文案占位（保证必有回复）；
- * 5. 机器人消息共享同一 roundId，且永不触发新轮次（触发源限制）。
+ * 1. 幂等检查：clientRequestId 已存在时直接返回首次轮次结果（锁内保证并发安全）；
+ * 2. 生成 roundId，人类消息落库；
+ * 3. 无启用机器人时拒绝发送（保证回复契约，不静默返回空轮次）；
+ * 4. 按响应策略选择机器人（CONTENT_ROUTED 无命中时随机兜底）；
+ * 5. 每轮回复数受 maxConsecutiveBotReplies 限制（防循环硬上限）；
+ * 6. 逐个机器人生成回复；生成失败以兜底文案占位（保证必有回复）；
+ * 7. 机器人消息共享同一 roundId，且永不触发新轮次（触发源限制）。
  */
 export async function sendGroupMessage(
   aiService: AiService,
   userId: string,
   groupId: string,
-  input: { content: string },
+  input: { content: string; clientRequestId?: string },
 ): Promise<SendGroupMessageResult> {
   // ACL：仅群组成员可发消息
   await assertGroupAccess(userId, groupId);
@@ -509,6 +522,37 @@ export async function sendGroupMessage(
     const content = input.content.trim();
     const bots = group.bots.map((gb) => gb.bot).filter((bot) => bot.isActive);
 
+    // 防御：群组内没有启用状态的机器人时，拒绝发送而不是静默返回零回复。
+    // 该状态属于群组配置异常（如机器人被停用），需由创建者修复后再发消息。
+    if (bots.length === 0) {
+      logger.warn({ groupId, userId }, 'group: send blocked, no active bots');
+      throw new AppError(409, 'NO_ACTIVE_BOT', 'Group has no active bots, cannot reply');
+    }
+
+    // 幂等：同一群组内相同 clientRequestId 直接返回首次轮次结果（锁内保证并发安全）。
+    // 命中时按 roundId 取回该轮全部机器人回复，与首次响应一致。
+    if (input.clientRequestId) {
+      const existing = await prisma.groupMessage.findUnique({
+        where: {
+          groupId_clientRequestId: {
+            groupId,
+            clientRequestId: input.clientRequestId,
+          },
+        },
+      });
+      if (existing) {
+        const existingBots = await prisma.groupMessage.findMany({
+          where: { groupId, roundId: existing.roundId, senderType: SenderType.BOT },
+          orderBy: { createdAt: 'asc' },
+        });
+        logger.debug({ groupId, clientRequestId: input.clientRequestId }, 'group: idempotent hit');
+        return {
+          userMessage: toGroupMessageOutput(existing),
+          botMessages: existingBots.map(toGroupMessageOutput),
+        };
+      }
+    }
+
     // 生成唯一轮次 id：本轮所有机器人回复共享，作为防循环的分组依据
     const roundId = randomUUID();
     const userMessage = await prisma.groupMessage.create({
@@ -519,6 +563,7 @@ export async function sendGroupMessage(
         userId,
         content,
         status: MessageStatus.SENT,
+        clientRequestId: input.clientRequestId,
       },
     });
 

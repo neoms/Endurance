@@ -593,7 +593,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
   /**
    * POST /api/groups/{id}/messages 发送群组消息（触发机器人回复）
    *
-   * 入参：{ content }；返回值：201 { userMessage, botMessages }。
+   * 入参：{ content, clientRequestId? }；返回值：201 { userMessage, botMessages }。
    *
    * @openapi
    * /api/groups/{id}/messages:
@@ -602,7 +602,9 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *     summary: 发送群组消息（触发机器人回复）
    *     description: 人类成员发言，并按群组响应策略触发一个或多个机器人回复；
    *       每轮回复数受 maxConsecutiveBotReplies 限制（防循环），
-   *       生成失败时以兜底文案占位，保证至少有一个机器人回复。
+   *       生成失败时以兜底文案占位，保证至少有一个机器人回复；
+   *       携带 clientRequestId 可在同一群组内幂等去重（重复提交返回首次轮次结果）；
+   *       群组内没有启用状态的机器人时返回 409 NO_ACTIVE_BOT。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -633,6 +635,12 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *               $ref: '#/components/schemas/ErrorResponse'
    *       '404':
    *         description: 群组不存在或当前用户不是成员
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   *       '409':
+   *         description: 群组内没有启用状态的机器人，无法回复
    *         content:
    *           application/json:
    *             schema:

@@ -8,6 +8,9 @@
  * - 消息与机器人响应：ALL_BOTS / RANDOM_ONE / CONTENT_ROUTED / 无命中兜底；
  * - 防循环：roundId 轮次隔离 + maxConsecutiveBotReplies 上限；
  * - 兜底回复：AI 持续失败时机器人以兜底文案回复；
+ * - 防御：无启用机器人 409；移除机器人时至少保留一个启用机器人；
+ * - 幂等：clientRequestId 顺序/并发重复提交均返回首次轮次结果；
+ * - 创建群组时 botIds 去重；
  * - 历史消息与 ACL。
  */
 import request from 'supertest';
@@ -72,6 +75,17 @@ describe('groups API', () => {
 
     expect(badBot.status).toBe(404);
     expect(noBot.status).toBe(422);
+  });
+
+  it('dedupes duplicate botIds when creating a group', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botId] = await getBotIds();
+
+    // botIds 传入重复 id：按单个机器人去重处理，不应报 404 或撞复合主键
+    const res = await createGroup(token, { name: 'g', botIds: [botId!, botId!] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.group.bots).toHaveLength(1);
   });
 
   it('lists only groups I participate in', async () => {
@@ -198,6 +212,97 @@ describe('groups API', () => {
       .set(auth(token));
     expect(removeLast.status).toBe(409);
     expect(removeLast.body.error.code).toBe('LAST_BOT');
+  });
+
+  it('refuses to remove a bot if it would leave no active bots', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botA, botB] = await getBotIds();
+    const created = await createGroup(token, { name: 'g', botIds: [botA!, botB!] });
+    const groupId = created.body.group.id as string;
+
+    // 模拟停用 botA：此时只有 botB 处于启用状态
+    await prisma.bot.update({ where: { id: botA! }, data: { isActive: false } });
+    try {
+      // 移除已停用的 botA → 允许（还剩启用的 botB）
+      const removeInactive = await request(app)
+        .delete(`/api/groups/${groupId}/bots/${botA}`)
+        .set(auth(token));
+      expect(removeInactive.status).toBe(200);
+
+      // 再移除最后一个启用机器人 botB → 409（保证人类消息后必有回复）
+      const removeLastActive = await request(app)
+        .delete(`/api/groups/${groupId}/bots/${botB}`)
+        .set(auth(token));
+      expect(removeLastActive.status).toBe(409);
+      expect(removeLastActive.body.error.code).toBe('LAST_BOT');
+    } finally {
+      // 恢复启用状态，避免影响其他用例（bots 表不在 beforeEach 清理范围内）
+      await prisma.bot.update({ where: { id: botA! }, data: { isActive: true } });
+    }
+  });
+
+  it('blocks sending when the group has no active bots (409)', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: 'g', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    // 模拟唯一机器人被停用（当前无停用接口，直接改库）
+    await prisma.bot.update({ where: { id: botId! }, data: { isActive: false } });
+    try {
+      const res = await request(app)
+        .post(`/api/groups/${groupId}/messages`)
+        .set(auth(token))
+        .send({ content: '还有机器人吗' });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('NO_ACTIVE_BOT');
+    } finally {
+      await prisma.bot.update({ where: { id: botId! }, data: { isActive: true } });
+    }
+  });
+
+  it('is idempotent for the same clientRequestId in group messages', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: 'g', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+    const payload = { content: '幂等群消息', clientRequestId: 'group-req-000001' };
+
+    const first = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send(payload);
+    const second = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send(payload);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(second.body.userMessage.id).toBe(first.body.userMessage.id);
+    expect(second.body.botMessages[0].id).toBe(first.body.botMessages[0].id);
+
+    // 历史中只有一轮（1 条人类 + 1 条机器人），无重复消息
+    const history = await request(app).get(`/api/groups/${groupId}/messages`).set(auth(token));
+    expect(history.body.messages).toHaveLength(2);
+  });
+
+  it('handles concurrent duplicate group submissions idempotently (no 500)', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: 'g', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+    const payload = { content: '并发幂等', clientRequestId: 'group-race-0001' };
+
+    // 群组级锁保证串行：两个并发相同键的请求都返回首次轮次结果
+    const [r1, r2] = await Promise.all([
+      request(app).post(`/api/groups/${groupId}/messages`).set(auth(token)).send(payload),
+      request(app).post(`/api/groups/${groupId}/messages`).set(auth(token)).send(payload),
+    ]);
+
+    expect(r1.status).toBe(201);
+    expect(r2.status).toBe(201);
+    expect(r2.body.userMessage.id).toBe(r1.body.userMessage.id);
   });
 
   it('ALL_BOTS: every bot replies in the same round', async () => {
