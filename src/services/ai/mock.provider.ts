@@ -141,20 +141,19 @@ export class MockAiProvider implements AiProvider {
    * @param context 生成上下文（content / botName / userName）
    * @returns string 完整回复文本
    * 说明：
-   * - 机器人有名字时带「机器人名：」前缀，方便群组场景区分发言者；
+   * - 内容里**不再写 NPC 自己的名字前缀**：发言者由前端头像/名字标签与
+   *   群组历史上下文的前缀逻辑负责（见 group.service.ts buildGroupHistory），
+   *   避免「存库带前缀 + 历史再拼前缀」导致双重前缀、模型模仿出多重前缀；
    * - 回显消息使用「发送者用户名说：」而不是写死「你说」——
    *   用户名由消息服务在调用时传入（个人对话取当前用户，群组取实际发言成员）。
    */
   private buildReply(context: AiGenerateContext): string {
-    // 机器人有名字时带上前缀，方便群组场景区分发言者
-    const prefix = context.botName ? `${context.botName}：` : '';
     if (this.options.mode === 'random') {
-      const reply = RANDOM_REPLIES[Math.floor(Math.random() * RANDOM_REPLIES.length)];
-      return `${prefix}${reply}`;
+      return RANDOM_REPLIES[Math.floor(Math.random() * RANDOM_REPLIES.length)] ?? '';
     }
     // 回显消息时带上「发送者用户名」，而不是写死「你说」——
     // 用户名由消息服务在调用时传入（个人对话取当前用户，群组取实际发言成员）。
-    return `${prefix}${context.userName ?? '用户'}说：「${context.content}」——这是一条模拟回复。`;
+    return `${context.userName ?? '用户'}说：「${context.content}」——这是一条模拟回复。`;
   }
 }
 

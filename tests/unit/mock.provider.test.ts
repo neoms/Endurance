@@ -20,11 +20,14 @@ describe('MockAiProvider', () => {
     expect(result.content).toContain('你好');
   });
 
-  it('prepends the bot name in group context', async () => {
+  it('does not embed the NPC name prefix in group content', async () => {
     const provider = new MockAiProvider();
     const result = await provider.generate({ content: 'hi', botName: '库珀', userName: 'alice' });
 
-    expect(result.content.startsWith('库珀：')).toBe(true);
+    // 内容不应带 NPC 自己的名字前缀（发言者由前端标签与历史前缀逻辑负责，
+    // 避免与历史上下文前缀叠加成双重前缀）
+    expect(result.content.startsWith('库珀')).toBe(false);
+    expect(result.content).toContain('alice说：');
   });
 });
 

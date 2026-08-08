@@ -221,6 +221,76 @@ export function selectBotsForRound(
 }
 
 /**
+ * 去除回复内容开头的「NPC 自报名」前缀
+ *
+ * @param content AI 生成的回复文本
+ * @param botName NPC 名称
+ * @returns string 去掉开头名称前缀后的内容（自动 trim）
+ * 说明：真实大模型有时会模仿历史消息的「名字：」格式，在回复开头自报家门；
+ * 发言者身份已由前端头像/名字标签展示，存库时应去掉该前缀——
+ * 否则「内容带前缀 + 历史上下文再拼前缀」会形成双重前缀，
+ * 模型再模仿该格式就可能输出多重前缀（如「库珀：库珀：…」）。
+ */
+export function stripLeadingSpeakerName(content: string, botName: string): string {
+  // 名称可能含正则特殊字符，先转义
+  const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // 名字后必须跟「说」/冒号/空白才视为前缀（避免误伤「库珀的想法」这类正常开头）；
+  // 允许连续多个前缀（处理模型多次自报家门）
+  const pattern = new RegExp(`^\\s*(?:${escaped}(?=说|[:：]|\\s)(?:说)?[:：]?\\s*)+`, 'u');
+  return content.replace(pattern, '').trim();
+}
+
+/**
+ * 创建流式「开头名称前缀」剥离器（跨 chunk 状态机）
+ *
+ * @param botName NPC 名称
+ * @returns (chunk: string) => string 逐块剥离函数
+ * 说明：流式增量可能把前缀拆成多个 chunk（如「库」「珀：」），
+ * 因此在确认开头不是名称前缀前先暂存内容；确认是前缀则剥离后输出剩余部分，
+ * 确认不是则原样输出。用于群组流式回复，避免「名字前缀」在打字气泡里闪现后消失。
+ */
+export function createLeadingNameStripper(botName: string): (chunk: string) => string {
+  const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // 单个前缀段：可选前导空白 + 名字 + 可选「说」 + 冒号/空白。
+  // 名字后必须跟「说」/冒号/空白才视为前缀段（避免误伤「库珀的想法」这类正常开头）
+  const segment = new RegExp(`^\\s*(?:${escaped}(?=说|[:：]|\\s)(?:说)?[:：]?\\s*)`, 'u');
+  let pending = '';
+  let done = false;
+
+  return (chunk: string): string => {
+    // 已确认开头不是前缀：后续块原样透传
+    if (done) {
+      return chunk;
+    }
+    pending += chunk;
+
+    // 循环剥离所有完整前缀段（允许连续多个，如「库珀：库珀：…」）
+    for (;;) {
+      const match = pending.match(segment);
+      if (!match) {
+        break;
+      }
+      pending = pending.slice(match[0].length);
+    }
+
+    // 剩余为空：全部都是前缀段（可能还有更多前缀），继续等待
+    if (pending === '') {
+      return '';
+    }
+    // 剩余是名字的部分前缀或恰好等于名字（还差分隔符，如「库」「库珀」）：
+    // 暂存等待下一块，避免「库/珀/：」分块时漏剥
+    if (pending.length <= botName.length && botName.startsWith(pending)) {
+      return '';
+    }
+    // 已确认开头不是（或不再是）前缀：原样输出剩余内容，此后透传
+    done = true;
+    const out = pending;
+    pending = '';
+    return out;
+  };
+}
+
+/**
  * 群组成员访问校验（ACL）
  *
  * @param userId  当前用户 id
@@ -622,7 +692,9 @@ async function buildGroupHistory(
     const botName = m.bot?.name;
     return {
       role: 'assistant' as const,
-      content: botName ? `${botName}：${m.content}` : m.content,
+      // 先剥掉存量内容里可能残留的「NPC 名」前缀（历史数据/旧版本可能已带前缀），
+      // 再统一拼一次「名字：」——避免双重前缀进入上下文、模型模仿出多重前缀
+      content: botName ? `${botName}：${stripLeadingSpeakerName(m.content, botName)}` : m.content,
     };
   });
   // 滑动窗口 + 总结：达到阈值时用摘要替换最早部分，保留最近 5 条原文
@@ -825,7 +897,10 @@ export async function sendGroupMessage(
           history,
           userName: senderName,
         });
-        replyText = reply;
+        // 去掉回复开头的「NPC 名」前缀（真实模型有时会模仿历史格式自报家门）；
+        // 剥完后为空（模型只回了名字）→ 用兜底文案，保证必有回复
+        const clean = stripLeadingSpeakerName(reply, bot.name);
+        replyText = clean.trim() ? clean : FALLBACK_REPLY;
       } catch (err) {
         // 保证回复：生成失败时以兜底文案占位（不中断本轮其他机器人）
         logger.error(
@@ -1078,6 +1153,8 @@ export async function streamSendGroupMessage(
 
       // 流式生成：逐块累积并回调；失败时以兜底文案落库（保证必有回复）
       let partial = '';
+      // 跨 chunk 剥离开头的「NPC 名」前缀，避免前缀在打字气泡里闪现后消失
+      const strip = createLeadingNameStripper(bot.name);
       try {
         for await (const delta of aiService.streamWithRetry(
           {
@@ -1089,12 +1166,17 @@ export async function streamSendGroupMessage(
           },
           { clientSignal },
         )) {
-          partial += delta;
-          events.botDelta?.(pending.id, delta);
+          const visible = strip(delta);
+          partial += visible;
+          if (visible) {
+            events.botDelta?.(pending.id, visible);
+          }
         }
+        // 剥完前缀后内容为空（模型只回了名字）→ 用兜底文案，保证必有回复
+        const finalContent = partial.trim() ? partial : FALLBACK_REPLY;
         const saved = await prisma.groupMessage.update({
           where: { id: pending.id },
-          data: { content: partial, status: MessageStatus.SENT },
+          data: { content: finalContent, status: MessageStatus.SENT },
         });
         const savedWithSender = await prisma.groupMessage.findUnique({
           where: { id: saved.id },
@@ -1104,7 +1186,7 @@ export async function streamSendGroupMessage(
           { groupId, roundId, botId: bot.id, chars: saved.content.length },
           'group: stream bot reply saved',
         );
-        roundReplies.push({ botId: bot.id, content: partial });
+        roundReplies.push({ botId: bot.id, content: finalContent });
         events.botDone?.(toGroupMessageOutput(savedWithSender!));
       } catch (err) {
         // 保证回复：生成失败/流中断时以兜底文案落库（不中断本轮其他机器人）。
