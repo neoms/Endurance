@@ -225,129 +225,14 @@ export default function GroupDetailPage() {
   };
 
   return (
-    <div className="page">
-      <div className="page-header">
-        <button className="secondary" onClick={() => navigate('/groups')}>
-          ← 返回
-        </button>
-        <h3 style={{ margin: 0 }}>{group?.name ?? '群组'}</h3>
-        <button className="danger" onClick={() => void leave()}>
-          离开群组
-        </button>
-      </div>
-
-      <div className="error-text">{error}</div>
-
-      <div className="grid-2">
-        <div>
-          <div className="card">
-            <h4 style={{ marginTop: 0 }}>成员（{group?.members.length ?? 0}）</h4>
-            {group?.members.map((member) => (
-              <div className="member-row" key={member.userId}>
-                <span>
-                  {member.displayName} <span className="role-badge">{member.role}</span>
-                </span>
-                {isOwner && member.role !== 'OWNER' && (
-                  <button className="secondary" onClick={() => void removeMember(member.userId)}>
-                    移除
-                  </button>
-                )}
-              </div>
-            ))}
-            {isOwner && (
-              <div className="item-row" style={{ marginTop: 10 }}>
-                <input
-                  value={addUserId}
-                  onChange={(e) => setAddUserId(e.target.value)}
-                  placeholder="用户 id"
-                />
-                <button className="secondary" onClick={() => void addMember()}>
-                  添加
-                </button>
-              </div>
-            )}
-          </div>
-
-          <div className="card">
-            <h4 style={{ marginTop: 0 }}>机器人（{group?.bots.length ?? 0}）</h4>
-            {group?.bots.map((bot) => (
-              <div className="bot-row" key={bot.id}>
-                <span>{bot.name}</span>
-                {isOwner && (
-                  <button className="secondary" onClick={() => void removeBot(bot.id)}>
-                    移除
-                  </button>
-                )}
-              </div>
-            ))}
-            {isOwner && (
-              <div className="item-row" style={{ marginTop: 10 }}>
-                <select value={addBotId} onChange={(e) => setAddBotId(e.target.value)}>
-                  <option value="">选择机器人…</option>
-                  {bots
-                    .filter((b) => !group?.bots.some((gb) => gb.id === b.id))
-                    .map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.name}
-                      </option>
-                    ))}
-                </select>
-                <button className="secondary" onClick={() => void addBot()}>
-                  添加
-                </button>
-              </div>
-            )}
-            <div className="item-meta" style={{ marginTop: 8 }}>
-              策略：{group?.responseMode} · 每轮上限：{group?.maxConsecutiveBotReplies}
-            </div>
-          </div>
-
-          {isOwner && (
-            <div className="card">
-              <h4 style={{ marginTop: 0 }}>群组设置</h4>
-              <div className="field">
-                <label htmlFor="groupNameEdit">名称（1-50）</label>
-                <input
-                  id="groupNameEdit"
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  maxLength={50}
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="responseModeEdit">响应策略</label>
-                <select
-                  id="responseModeEdit"
-                  value={editResponseMode}
-                  onChange={(e) => setEditResponseMode(e.target.value as typeof editResponseMode)}
-                >
-                  <option value="ALL_BOTS">全部机器人回复</option>
-                  <option value="RANDOM_ONE">随机一个回复</option>
-                  <option value="CONTENT_ROUTED">按内容路由</option>
-                </select>
-              </div>
-              <div className="field">
-                <label htmlFor="maxRepliesEdit">每轮回复上限（1-10）</label>
-                <input
-                  id="maxRepliesEdit"
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={editMaxReplies}
-                  onChange={(e) => setEditMaxReplies(Number(e.target.value))}
-                />
-              </div>
-              <button onClick={() => void saveConfig()} disabled={savingConfig || !editName.trim()}>
-                {savingConfig ? '保存中…' : '保存设置'}
-              </button>
-            </div>
-          )}
-        </div>
-
-        <div className="card chat-window">
-          <div className="chat-messages">
+    <div className="group-detail">
+      {/* 群聊主区 */}
+      <div className="group-chat">
+        <div className="chat-header">{group?.name ?? '群组'}</div>
+        <div className="chat-messages">
+          <div className="chat-scroll">
             {hasMore && (
-              <div className="center" style={{ padding: 8 }}>
+              <div className="center-load">
                 <button
                   className="secondary"
                   onClick={() => void loadOlder()}
@@ -358,17 +243,31 @@ export default function GroupDetailPage() {
               </div>
             )}
             {messages.map((message) => (
-              <div key={message.id}>
-                <div className={`bubble ${message.senderType === 'HUMAN' ? 'user' : 'bot'}`}>
-                  {message.senderType === 'BOT' && (
-                    <div className="item-meta">{botNameById(message.botId)}</div>
-                  )}
-                  {message.content}
+              <div
+                key={message.id}
+                className={`message-row ${message.senderType === 'HUMAN' ? 'user' : 'bot'}`}
+              >
+                {/* 机器人消息：头像在左（用机器人名首字占位） */}
+                {message.senderType === 'BOT' && (
+                  <div className="avatar-sm bot">{botNameById(message.botId).slice(0, 1)}</div>
+                )}
+                <div className="message-content">
+                  <div className="message-author">
+                    {message.senderType === 'HUMAN' ? '我' : botNameById(message.botId)}
+                  </div>
+                  <div className={`bubble ${message.senderType === 'HUMAN' ? 'user' : 'bot'}`}>
+                    {message.content}
+                  </div>
                 </div>
+                {/* 用户消息：头像在右 */}
+                {message.senderType === 'HUMAN' && <div className="avatar-sm user">我</div>}
               </div>
             ))}
             <div ref={bottomRef} />
           </div>
+        </div>
+        <div className="chat-input-wrap">
+          <div className="error-text">{error}</div>
           <form className="chat-input" onSubmit={(e) => void send(e)}>
             <textarea
               value={input}
@@ -379,18 +278,129 @@ export default function GroupDetailPage() {
               }}
               placeholder="发送消息，机器人将按策略回复…"
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+                // isComposing：中文输入法按回车「上屏」时不触发发送，避免发出不完整的输入内容
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   void send(e);
                 }
               }}
             />
-            <button type="submit" disabled={sending || !input.trim()}>
-              发送
+            <button type="submit" className="send-btn" disabled={sending || !input.trim()}>
+              ➤
             </button>
           </form>
         </div>
       </div>
+
+      {/* 群组信息侧栏 */}
+      <aside className="group-info">
+        <div className="card">
+          <h4 style={{ marginTop: 0 }}>成员（{group?.members.length ?? 0}）</h4>
+          {group?.members.map((member) => (
+            <div className="member-row" key={member.userId}>
+              <span>
+                {member.displayName} <span className="role-badge">{member.role}</span>
+              </span>
+              {isOwner && member.role !== 'OWNER' && (
+                <button className="secondary" onClick={() => void removeMember(member.userId)}>
+                  移除
+                </button>
+              )}
+            </div>
+          ))}
+          {isOwner && (
+            <div className="item-row" style={{ marginTop: 10 }}>
+              <input
+                value={addUserId}
+                onChange={(e) => setAddUserId(e.target.value)}
+                placeholder="用户 id"
+              />
+              <button className="secondary" onClick={() => void addMember()}>
+                添加
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <h4 style={{ marginTop: 0 }}>机器人（{group?.bots.length ?? 0}）</h4>
+          {group?.bots.map((bot) => (
+            <div className="bot-row" key={bot.id}>
+              <span>{bot.name}</span>
+              {isOwner && (
+                <button className="secondary" onClick={() => void removeBot(bot.id)}>
+                  移除
+                </button>
+              )}
+            </div>
+          ))}
+          {isOwner && (
+            <div className="item-row" style={{ marginTop: 10 }}>
+              <select value={addBotId} onChange={(e) => setAddBotId(e.target.value)}>
+                <option value="">选择机器人…</option>
+                {bots
+                  .filter((b) => !group?.bots.some((gb) => gb.id === b.id))
+                  .map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+              </select>
+              <button className="secondary" onClick={() => void addBot()}>
+                添加
+              </button>
+            </div>
+          )}
+          <div className="item-meta" style={{ marginTop: 8 }}>
+            策略：{group?.responseMode} · 每轮上限：{group?.maxConsecutiveBotReplies}
+          </div>
+        </div>
+
+        {isOwner && (
+          <div className="card">
+            <h4 style={{ marginTop: 0 }}>群组设置</h4>
+            <div className="field">
+              <label htmlFor="groupNameEdit">名称（1-50）</label>
+              <input
+                id="groupNameEdit"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                maxLength={50}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="responseModeEdit">响应策略</label>
+              <select
+                id="responseModeEdit"
+                value={editResponseMode}
+                onChange={(e) => setEditResponseMode(e.target.value as typeof editResponseMode)}
+              >
+                <option value="ALL_BOTS">全部机器人回复</option>
+                <option value="RANDOM_ONE">随机一个回复</option>
+                <option value="CONTENT_ROUTED">按内容路由</option>
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="maxRepliesEdit">每轮回复上限（1-10）</label>
+              <input
+                id="maxRepliesEdit"
+                type="number"
+                min={1}
+                max={10}
+                value={editMaxReplies}
+                onChange={(e) => setEditMaxReplies(Number(e.target.value))}
+              />
+            </div>
+            <button onClick={() => void saveConfig()} disabled={savingConfig || !editName.trim()}>
+              {savingConfig ? '保存中…' : '保存设置'}
+            </button>
+          </div>
+        )}
+
+        <button className="danger" style={{ width: '100%' }} onClick={() => void leave()}>
+          离开群组
+        </button>
+      </aside>
     </div>
   );
 }

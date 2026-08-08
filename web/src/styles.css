@@ -1,21 +1,27 @@
 /**
- * 全局样式
+ * 全局样式（参照 ChatGPT 网页版布局）
  *
- * 【设计说明】
- * 轻量纯 CSS（无 UI 框架），提供简洁的卡片式布局、聊天气泡与表单样式。
+ * 【布局说明】
+ * - 左侧固定边栏：新建对话、对话/群组切换、历史列表、底部用户区；
+ * - 主区域：欢迎页（空状态）或聊天页（顶部标题 + 消息流 + 底部圆角输入框）；
+ * - 窄屏（<768px）边栏收起为浮层，左上角按钮展开。
  */
 
 :root {
   color-scheme: light;
-  --primary: #4f46e5;
-  --primary-dark: #4338ca;
+  --primary: #10a37f;
+  --primary-dark: #0e8f6f;
   --danger: #dc2626;
-  --bg: #f4f5f7;
+  --bg: #ffffff;
+  --sidebar-bg: #f9f9f9;
   --card: #ffffff;
-  --border: #e3e5e8;
-  --text: #1f2430;
+  --border: #e5e5e5;
+  --hover: #ececec;
+  --active: #e0e0e0;
+  --text: #0d0d0d;
   --muted: #6b7280;
-  --radius: 10px;
+  --radius: 8px;
+  --sidebar-width: 272px;
 }
 
 * {
@@ -28,6 +34,7 @@ body {
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   background: var(--bg);
   color: var(--text);
+  font-size: 15px;
 }
 
 .center-screen {
@@ -37,31 +44,411 @@ body {
   justify-content: center;
 }
 
-/* ---------- 布局 ---------- */
-.page {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 24px 16px 48px;
+/* ========== 应用主布局：侧边栏 + 主区域 ========== */
+.app-layout {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
 }
 
-.page-header {
+.sidebar {
+  width: var(--sidebar-width);
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  transition: margin-left 0.2s ease;
+}
+
+.sidebar.collapsed {
+  margin-left: calc(-1 * var(--sidebar-width));
+}
+
+.sidebar-header {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.new-chat-btn {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.new-chat-btn:hover {
+  background: var(--hover);
+}
+
+.sidebar-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px;
+}
+
+.sidebar-tab {
+  flex: 1;
+  padding: 7px 0;
+  border-radius: var(--radius);
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.sidebar-tab.active {
+  background: var(--hover);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.sidebar-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 12px 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.sidebar-filter-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.sidebar-filter-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.sidebar-filter-empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.filter-chip {
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.filter-chip.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.sidebar-item {
+  position: relative;
+  padding: 9px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+
+.sidebar-item:hover {
+  background: var(--hover);
+}
+
+.sidebar-item.active {
+  /* 激活色：品牌绿浅底 + 绿色标题，与 hover 灰明显区分 */
+  background: #e6f4ef;
+}
+
+.sidebar-item.active .sidebar-item-title {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.sidebar-item-title {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 56px;
+}
+
+.sidebar-item-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.sidebar-item-actions {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  right: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.icon-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-btn:hover {
+  background: #d9d9d9;
+  color: var(--text);
+}
+
+/* 三点下拉菜单 */
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+}
+
+.sidebar-menu {
+  position: absolute;
+  top: 30px;
+  right: 8px;
+  z-index: 10;
+  min-width: 132px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  padding: 4px;
+}
+
+.sidebar-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sidebar-menu button:hover {
+  background: var(--hover);
+}
+
+.sidebar-menu button.menu-danger {
+  color: var(--danger);
+}
+
+.sidebar-menu button.menu-danger:hover {
+  background: #fef2f2;
+}
+
+.sidebar-footer {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 20px;
+  gap: 8px;
+}
+
+/* ========== 悬浮编辑框（模态） ========== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+}
+
+.modal {
+  background: var(--card);
+  border-radius: 14px;
+  padding: 20px;
+  width: 360px;
+  max-width: 92vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.16);
+}
+
+.modal-wide {
+  width: 440px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.bot-toggle-row {
+  display: flex;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
-.card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 12px;
+.avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
 }
 
-/* ---------- 表单 ---------- */
+.sidebar-user {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-user-name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-error {
+  padding: 0 12px 6px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+/* 主区域 */
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  position: relative;
+}
+
+.sidebar-toggle {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 20;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-size: 16px;
+  cursor: pointer;
+  display: none;
+}
+
+.sidebar-overlay {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    z-index: 30;
+    height: 100vh;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.12);
+  }
+
+  .sidebar.collapsed {
+    margin-left: calc(-1 * var(--sidebar-width));
+    box-shadow: none;
+  }
+
+  .sidebar-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.3);
+    z-index: 25;
+  }
+}
+
+/* ========== 登录页 ========== */
+.auth-card {
+  width: 380px;
+  max-width: 92vw;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.05);
+}
+
+.auth-card h2 {
+  text-align: center;
+  font-size: 22px;
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.auth-tabs button {
+  flex: 1;
+  padding: 8px;
+  border-radius: var(--radius);
+  border: none;
+  background: #eef0f3;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.auth-tabs button.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+/* ========== 表单 ========== */
 .field {
   margin-bottom: 12px;
   display: flex;
@@ -77,21 +464,30 @@ body {
 input,
 select,
 textarea {
-  padding: 8px 10px;
+  padding: 9px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-size: 14px;
   width: 100%;
+  font-family: inherit;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 2px solid rgba(16, 163, 127, 0.25);
+  border-color: var(--primary);
 }
 
 button {
   padding: 8px 14px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--primary);
   color: #fff;
   font-size: 14px;
   cursor: pointer;
+  font-family: inherit;
 }
 
 button:hover {
@@ -104,7 +500,7 @@ button.secondary {
 }
 
 button.secondary:hover {
-  background: #e2e5ea;
+  background: var(--hover);
 }
 
 button.danger {
@@ -123,30 +519,272 @@ button:disabled {
   margin: 4px 0;
 }
 
-/* ---------- 登录页 ---------- */
-.auth-card {
-  width: 360px;
-  max-width: 92vw;
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
 }
 
-.auth-tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-.auth-tabs button {
+/* ========== 欢迎页（空状态） ========== */
+.welcome {
   flex: 1;
-  background: #eef0f3;
-  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow-y: auto;
 }
 
-.auth-tabs button.active {
+.welcome-title {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 8px 0;
+}
+
+.welcome-sub {
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.suggestion-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 36px;
+  max-width: 560px;
+  width: 100%;
+}
+
+.suggestion-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1.5;
+  background: var(--card);
+  transition: background 0.15s;
+}
+
+.suggestion-card:hover {
+  background: var(--hover);
+}
+
+@media (max-width: 560px) {
+  .suggestion-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ========== 聊天（主区） ========== */
+.chat-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  font-weight: 600;
+  font-size: 16px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.chat-scroll {
+  max-width: 768px;
+  margin: 0 auto;
+  padding: 24px 20px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.message-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.message-row.user {
+  justify-content: flex-end;
+}
+
+.message-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 80%;
+}
+
+.message-row.user .message-content {
+  align-items: flex-end;
+}
+
+.message-author {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 5px;
+}
+
+.avatar-sm {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.avatar-sm.user {
   background: var(--primary);
   color: #fff;
 }
 
-/* ---------- 对话/群组列表 ---------- */
+.avatar-sm.bot {
+  background: var(--hover);
+  color: var(--muted);
+}
+
+.bubble {
+  max-width: 100%;
+  width: fit-content;
+  padding: 10px 16px;
+  border-radius: 18px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.bubble.user {
+  background: var(--primary);
+  color: #fff;
+  border-bottom-right-radius: 6px;
+}
+
+.bubble.bot {
+  background: #f4f4f5;
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 6px;
+}
+
+.bubble.failed {
+  color: var(--danger);
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+}
+
+.chat-input-wrap {
+  padding: 8px 20px 16px;
+  flex-shrink: 0;
+}
+
+.chat-input {
+  max-width: 768px;
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 8px 8px 8px 18px;
+  background: var(--card);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+}
+
+.chat-input:focus-within {
+  border-color: var(--primary);
+}
+
+.chat-input textarea {
+  flex: 1;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  font-size: 15px;
+  padding: 8px 0;
+  min-height: 24px;
+  max-height: 160px;
+}
+
+.send-btn {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-size: 17px;
+  flex-shrink: 0;
+}
+
+.send-btn:disabled {
+  background: var(--hover);
+  color: var(--muted);
+}
+
+.center-load {
+  text-align: center;
+  color: var(--muted);
+  padding: 20px;
+}
+
+/* ========== 群组（主区） ========== */
+.group-detail {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.group-chat {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.group-info {
+  width: 300px;
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 14px;
+  background: var(--sidebar-bg);
+  flex-shrink: 0;
+}
+
+.group-info .card {
+  margin-bottom: 12px;
+}
+
+.member-row,
+.bot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.role-badge {
+  font-size: 11px;
+  background: var(--hover);
+  border-radius: 999px;
+  padding: 1px 8px;
+  color: var(--muted);
+}
+
 .item-row {
   display: flex;
   align-items: center;
@@ -158,7 +796,7 @@ button:disabled {
   font-weight: 600;
   cursor: pointer;
   flex: 1;
-  min-width: 160px;
+  min-width: 120px;
 }
 
 .item-meta {
@@ -170,7 +808,7 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: #eef2ff;
+  background: #e6f4ef;
   color: var(--primary);
   border-radius: 999px;
   padding: 2px 10px;
@@ -184,111 +822,13 @@ button:disabled {
   opacity: 0.7;
 }
 
-.filter-bar {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
+.create-group-card {
+  max-width: 520px;
+  margin: 48px auto;
 }
 
-.filter-chip {
-  border: 1px solid var(--border);
-  background: var(--card);
-  color: var(--text);
-  border-radius: 999px;
-  padding: 4px 12px;
-  font-size: 13px;
-}
-
-.filter-chip.active {
-  background: var(--primary);
-  color: #fff;
-  border-color: var(--primary);
-}
-
-/* ---------- 聊天 ---------- */
-.chat-window {
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 170px);
-  min-height: 420px;
-}
-
-.chat-messages {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 8px 4px;
-}
-
-.bubble {
-  max-width: 74%;
-  padding: 10px 14px;
-  border-radius: 14px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-.bubble.user {
-  align-self: flex-end;
-  background: var(--primary);
-  color: #fff;
-  border-bottom-right-radius: 4px;
-}
-
-.bubble.bot {
-  align-self: flex-start;
-  background: #fff;
-  border: 1px solid var(--border);
-  border-bottom-left-radius: 4px;
-}
-
-.bubble.failed {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-
-.chat-input {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.chat-input textarea {
-  resize: none;
-  height: 48px;
-}
-
-/* ---------- 群组 ---------- */
-.grid-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-
-@media (max-width: 720px) {
-  .grid-2 {
-    grid-template-columns: 1fr;
+@media (max-width: 900px) {
+  .group-info {
+    display: none;
   }
-}
-
-.member-row,
-.bot-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.role-badge {
-  font-size: 11px;
-  background: #eef0f3;
-  border-radius: 999px;
-  padding: 1px 8px;
-  color: var(--muted);
 }

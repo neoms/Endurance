@@ -8,14 +8,13 @@
  * - AI 失败（status=FAILED）展示错误标记与「重试」按钮（调用 retry 接口）。
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 
 import { api, ApiError } from '../api/client.js';
 import type { Conversation, Message, SendMessageResult } from '../api/types.js';
 
 export default function ChatPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
 
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -136,51 +135,57 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="page">
-      <div className="page-header">
-        <button className="secondary" onClick={() => navigate('/')}>
-          ← 返回
-        </button>
-        <h3 style={{ margin: 0 }}>{conversation?.title ?? '对话'}</h3>
-        <span />
-      </div>
-
-      <div className="card chat-window">
-        <div className="chat-messages">
+    <>
+      <div className="chat-header">{conversation?.title ?? '对话'}</div>
+      <div className="chat-messages">
+        <div className="chat-scroll">
           {hasMore && (
-            <div className="center" style={{ padding: 8 }}>
+            <div className="center-load">
               <button className="secondary" onClick={() => void loadOlder()} disabled={loadingMore}>
                 {loadingMore ? '加载中…' : '加载更早消息'}
               </button>
             </div>
           )}
           {messages.map((message) => (
-            <div key={message.id}>
-              <div
-                className={`bubble ${message.senderType === 'HUMAN' ? 'user' : 'bot'} ${
-                  message.status === 'FAILED' ? 'failed' : ''
-                }`}
-              >
-                {message.status === 'FAILED' ? (
-                  <>
-                    <div>AI 回复失败（{message.errorCode ?? '未知错误'}）</div>
-                    <button
-                      className="secondary"
-                      style={{ marginTop: 8 }}
-                      onClick={() => void retry(message.id)}
-                    >
-                      重试
-                    </button>
-                  </>
-                ) : (
-                  message.content
-                )}
+            <div
+              key={message.id}
+              className={`message-row ${message.senderType === 'HUMAN' ? 'user' : 'bot'}`}
+            >
+              {/* 机器人消息：头像在左 */}
+              {message.senderType === 'BOT' && <div className="avatar-sm bot">AI</div>}
+              <div className="message-content">
+                <div className="message-author">
+                  {message.senderType === 'HUMAN' ? '我' : 'AI 助手'}
+                </div>
+                <div
+                  className={`bubble ${message.senderType === 'HUMAN' ? 'user' : 'bot'} ${
+                    message.status === 'FAILED' ? 'failed' : ''
+                  }`}
+                >
+                  {message.status === 'FAILED' ? (
+                    <>
+                      <div>AI 回复失败（{message.errorCode ?? '未知错误'}）</div>
+                      <button
+                        className="secondary"
+                        style={{ marginTop: 8 }}
+                        onClick={() => void retry(message.id)}
+                      >
+                        重试
+                      </button>
+                    </>
+                  ) : (
+                    message.content
+                  )}
+                </div>
               </div>
+              {/* 用户消息：头像在右 */}
+              {message.senderType === 'HUMAN' && <div className="avatar-sm user">我</div>}
             </div>
           ))}
           <div ref={bottomRef} />
         </div>
-
+      </div>
+      <div className="chat-input-wrap">
         <div className="error-text">{error}</div>
         <form className="chat-input" onSubmit={(e) => void send(e)}>
           <textarea
@@ -192,17 +197,18 @@ export default function ChatPage() {
             }}
             placeholder="输入消息，Enter 发送（Shift+Enter 换行）"
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              // isComposing：中文输入法按回车「上屏」时不触发发送，避免发出不完整的输入内容
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 void send(e);
               }
             }}
           />
-          <button type="submit" disabled={sending || !input.trim()}>
-            发送
+          <button type="submit" className="send-btn" disabled={sending || !input.trim()}>
+            ➤
           </button>
         </form>
       </div>
-    </div>
+    </>
   );
 }
