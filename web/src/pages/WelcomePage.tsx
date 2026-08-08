@@ -17,7 +17,7 @@ const SUGGESTIONS = [
   '帮我制定一个一周学习 TypeScript 的计划',
   '用通俗的语言解释什么是数据库索引',
   '写一个带防抖的搜索输入组件',
-  '如何设计一个多机器人群聊的防死循环机制？',
+  '如何设计一个多 NPC 群聊的防死循环机制？',
 ];
 
 export default function WelcomePage() {

@@ -55,7 +55,7 @@ export default function AppLayout() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // 悬浮框：新建群组/加标签/重命名（null 表示关闭；新建对话直接创建不弹框）
   const [modal, setModal] = useState<SidebarModal | null>(null);
-  // 悬浮框内的错误提示（如「请至少选择一个机器人」显示在框内而非侧边栏底部）
+  // 悬浮框内的错误提示（如「请至少选择一个 NPC」显示在框内而非侧边栏底部）
   const [modalError, setModalError] = useState('');
 
   /**
@@ -186,7 +186,7 @@ export default function AppLayout() {
         case 'new-group': {
           if (modal.botIds.length === 0) {
             // 错误显示在悬浮框内部（modalError 渲染在 .modal 顶部）
-            setModalError('请至少选择一个机器人');
+            setModalError('请至少选择一个 NPC');
             return;
           }
           const res = await api<{ group: Group }>('/groups', {
@@ -250,7 +250,7 @@ export default function AppLayout() {
   };
 
   /**
-   * 打开「新建群组」悬浮框（先拉取可用机器人列表供勾选）
+   * 打开「新建群组」悬浮框（先拉取可用 NPC 列表供勾选）
    */
   const openNewGroupModal = async () => {
     try {
@@ -265,7 +265,7 @@ export default function AppLayout() {
         bots: res.bots,
       });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : '加载机器人失败');
+      setError(err instanceof ApiError ? err.message : '加载 NPC 失败');
     }
   };
 
@@ -492,7 +492,7 @@ export default function AppLayout() {
             className={`modal ${modal.kind === 'new-group' ? 'modal-wide' : ''}`}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* 悬浮框内部错误提示（如「请至少选择一个机器人」） */}
+            {/* 悬浮框内部错误提示（如「请至少选择一个 NPC」） */}
             <div className="error-text">{modalError}</div>
             {/* 加标签 */}
             {modal.kind === 'tag' && (
@@ -576,7 +576,7 @@ export default function AppLayout() {
                       })
                     }
                   >
-                    <option value="ALL_BOTS">全部机器人回复</option>
+                    <option value="ALL_BOTS">全部 NPC 回复</option>
                     <option value="RANDOM_ONE">随机一个回复</option>
                     <option value="CONTENT_ROUTED">按内容路由</option>
                   </select>
@@ -593,7 +593,7 @@ export default function AppLayout() {
                   />
                 </div>
                 <div className="field">
-                  <label>选择机器人（至少 1 个）</label>
+                  <label>选择 NPC（至少 1 个）</label>
                   <div className="bot-grid">
                     {modal.bots.map((bot) => (
                       <button

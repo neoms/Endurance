@@ -191,7 +191,7 @@ export default function ChatPage() {
               key={message.id}
               className={`message-row ${message.senderType === 'HUMAN' ? 'user' : 'bot'}`}
             >
-              {/* 机器人消息：头像在左 */}
+              {/* NPC 消息：头像在左 */}
               {message.senderType === 'BOT' && <div className="avatar-sm bot">AI</div>}
               <div className="message-content">
                 <div className="message-author">

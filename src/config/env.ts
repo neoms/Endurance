@@ -45,6 +45,9 @@ const envSchema = z.object({
   // DeepSeek 模型名（deepseek-v4-flash 为 V4 快速模型；
   // 应用固定关闭思考模式以换取低延迟，见 DeepSeekProvider）
   DEEPSEEK_MODEL: z.string().trim().min(1).default('deepseek-v4-flash'),
+  // AI 回复缓存 TTL（毫秒）：同一对话/群组内相同问题在 TTL 内直接回放上次回复，
+  // 避免重复调用外部 AI；设为 0 可关闭缓存（每次都真实调用）
+  AI_CACHE_TTL_MS: z.coerce.number().int().min(0).default(3600_000),
 });
 
 // 由 Schema 推导出的环境变量类型（供全局引用）

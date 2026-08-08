@@ -18,6 +18,7 @@
 import { Router } from 'express';
 
 import { AiService } from '../../services/ai/ai.service.js';
+import type { AiReplyCache } from '../../services/ai/cache.js';
 import {
   addBotToGroup,
   addGroupMember,
@@ -48,10 +49,10 @@ import { sendSseError, sendSseEvent, startSse } from '../sse.js';
 /**
  * 创建群组路由组
  *
- * @param deps { aiService } AI 服务（群组消息发送时触发机器人回复）
+ * @param deps { aiService, aiCache? } AI 服务与回复缓存（相同问题回放整轮 NPC 回复）
  * @returns Router 已装配全部群组相关路由的 Express Router
  */
-export function createGroupsRouter(deps: { aiService: AiService }) {
+export function createGroupsRouter(deps: { aiService: AiService; aiCache?: AiReplyCache | null }) {
   const router = Router();
 
   // 该路由组下所有接口都需要登录
@@ -68,7 +69,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *   post:
    *     tags: [Groups]
    *     summary: 创建群组
-   *     description: 创建群组对话，必须至少选择一个机器人；创建者自动成为 OWNER 成员。
+   *     description: 创建群组对话，必须至少选择一个 NPC；创建者自动成为 OWNER 成员。
    *     security:
    *       - bearerAuth: []
    *     requestBody:
@@ -95,7 +96,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *             schema:
    *               $ref: '#/components/schemas/ErrorResponse'
    *       '404':
-   *         description: 指定的机器人不存在
+   *         description: 指定的 NPC 不存在
    *         content:
    *           application/json:
    *             schema:
@@ -162,7 +163,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *   get:
    *     tags: [Groups]
    *     summary: 群组详情
-   *     description: 返回群组详情（成员 + 机器人）；仅群组成员可访问。
+   *     description: 返回群组详情（成员 + NPC）；仅群组成员可访问。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -213,7 +214,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *   patch:
    *     tags: [Groups]
    *     summary: 更新群组配置
-   *     description: 更新群组名称、机器人响应策略或防循环上限；仅创建者可操作。
+   *     description: 更新群组名称、NPC 响应策略或防循环上限；仅创建者可操作。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -467,8 +468,8 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    * /api/groups/{id}/bots:
    *   post:
    *     tags: [Groups]
-   *     summary: 添加机器人
-   *     description: 向群组添加一个机器人角色；仅创建者可操作；重复添加幂等。
+   *     summary: 添加 NPC
+   *     description: 向群组添加一个 NPC 角色；仅创建者可操作；重复添加幂等。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -508,7 +509,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *             schema:
    *               $ref: '#/components/schemas/ErrorResponse'
    *       '404':
-   *         description: 群组不存在或机器人不存在
+   *         description: 群组不存在或 NPC 不存在
    *         content:
    *           application/json:
    *             schema:
@@ -535,8 +536,8 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    * /api/groups/{id}/bots/{botId}:
    *   delete:
    *     tags: [Groups]
-   *     summary: 移除机器人
-   *     description: 从群组移除指定机器人；仅创建者可操作；群组必须至少保留 1 个机器人。
+   *     summary: 移除 NPC
+   *     description: 从群组移除指定 NPC；仅创建者可操作；群组必须至少保留 1 个 NPC。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -549,7 +550,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *       - name: botId
    *         in: path
    *         required: true
-   *         description: 机器人 id
+   *         description: NPC id
    *         schema:
    *           type: string
    *     responses:
@@ -576,13 +577,13 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *             schema:
    *               $ref: '#/components/schemas/ErrorResponse'
    *       '404':
-   *         description: 群组不存在或机器人不在群组中
+   *         description: 群组不存在或 NPC 不在群组中
    *         content:
    *           application/json:
    *             schema:
    *               $ref: '#/components/schemas/ErrorResponse'
    *       '409':
-   *         description: 群组只有 1 个机器人，不可移除
+   *         description: 群组只有 1 个 NPC，不可移除
    *         content:
    *           application/json:
    *             schema:
@@ -599,25 +600,25 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *
    * 入参：{ content, clientRequestId? }；返回值：201 { userMessage, botMessages }。
    * 查询参数：stream=true 时改用 SSE 流式输出（事件：user_message / bot_start /
-   * bot_delta / bot_done / round_done / error），每个机器人依次流式推送。
+   * bot_delta / bot_done / round_done / error），每个 NPC 依次流式推送。
    *
    * @openapi
    * /api/groups/{id}/messages:
    *   post:
    *     tags: [Groups]
-   *     summary: 发送群组消息（触发机器人回复）
-   *     description: 人类成员发言，并按群组响应策略触发一个或多个机器人回复；
-   *       支持 @提及：@机器人名 时仅被 @ 的机器人按出现顺序回复（覆盖响应策略与每轮上限）；
+   *     summary: 发送群组消息（触发 NPC 回复）
+   *     description: 人类成员发言，并按群组响应策略触发一个或多个 NPC 回复；
+   *       支持 @提及：@NPC名 时仅被 @ 的 NPC 按出现顺序回复（覆盖响应策略与每轮上限）；
    *       只要消息中存在 @提及（含只 @ 真人）→ 仅被 @ 的对象回复，
-   *       未提及的机器人不回复（只 @ 真人时本轮无机器人回复，由真人本人回复）；
+   *       未提及的 NPC 不回复（只 @ 真人时本轮无 NPC 回复，由真人本人回复）；
    *       被 @ 的名称必须存在于当前群组，否则返回 400 MENTION_NOT_FOUND；
    *       消息中没有任何 @ 时才按响应策略回复；
    *       每轮回复数受 maxConsecutiveBotReplies 限制（防循环），
-   *       生成失败时以兜底文案占位，保证至少有一个机器人回复；
+   *       生成失败时以兜底文案占位，保证至少有一个 NPC 回复；
    *       携带 clientRequestId 可在同一群组内幂等去重（重复提交返回首次轮次结果）；
-   *       群组内没有启用状态的机器人时返回 409 NO_ACTIVE_BOT；
+   *       群组内没有启用状态的 NPC 时返回 409 NO_ACTIVE_BOT；
    *       查询参数 `stream=true` 时响应改为 text/event-stream：
-   *       依次推送 user_message、bot_start（机器人开始回复，PENDING）、
+   *       依次推送 user_message、bot_start（NPC 开始回复，PENDING）、
    *       bot_delta（回复增量）、bot_done（完整回复）、round_done（本轮结束）；
    *       发生校验类错误时推送 error 事件。
    *     security:
@@ -632,7 +633,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *       - name: stream
    *         in: query
    *         required: false
-   *         description: 传 true 时以 SSE 流式返回机器人回复（默认 JSON 同步返回）
+   *         description: 传 true 时以 SSE 流式返回 NPC 回复（默认 JSON 同步返回）
    *         schema:
    *           type: boolean
    *           default: false
@@ -644,7 +645,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *             $ref: '#/components/schemas/SendGroupMessageRequest'
    *     responses:
    *       '201':
-   *         description: 发送成功，返回人类消息与本轮机器人回复
+   *         description: 发送成功，返回人类消息与本轮 NPC 回复
    *         content:
    *           application/json:
    *             schema:
@@ -668,7 +669,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *             schema:
    *               $ref: '#/components/schemas/ErrorResponse'
    *       '409':
-   *         description: 群组内没有启用状态的机器人，无法回复
+   *         description: 群组内没有启用状态的 NPC，无法回复
    *         content:
    *           application/json:
    *             schema:
@@ -711,6 +712,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
             roundDone: () => sendSseEvent(res, 'round_done', { ok: true }),
           },
           controller.signal,
+          deps.aiCache,
         );
       } catch (err) {
         // 首个事件发出前的失败（404/409/400 等）：以 error 事件告知前端
@@ -726,7 +728,13 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
       return;
     }
 
-    const result = await sendGroupMessage(deps.aiService, user.id, paramId(req), req.body);
+    const result = await sendGroupMessage(
+      deps.aiService,
+      user.id,
+      paramId(req),
+      req.body,
+      deps.aiCache,
+    );
     res.status(201).json(result);
   });
 
@@ -741,7 +749,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *   get:
    *     tags: [Groups]
    *     summary: 群组历史消息（游标分页）
-   *     description: 按时间升序返回群组内消息（人类与机器人发言）。
+   *     description: 按时间升序返回群组内消息（人类与 NPC 发言）。
    *       默认返回最近 limit 条；`before` 返回该消息之前的消息；`cursor` 正向翻页。
    *     security:
    *       - bearerAuth: []

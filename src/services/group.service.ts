@@ -57,6 +57,7 @@ import type {
 } from '../types/group.js';
 import { buildContextHistory, MAX_CONTEXT_HISTORY } from './ai/context.js';
 import type { AiService } from './ai/ai.service.js';
+import { cacheKey, type AiReplyCache } from './ai/cache.js';
 
 // 机器人生成失败时的兜底文案（保证人类消息后必有回复）
 const FALLBACK_REPLY = '我暂时无法回答，请稍后再试。';
@@ -658,6 +659,7 @@ export async function sendGroupMessage(
   userId: string,
   groupId: string,
   input: { content: string; clientRequestId?: string },
+  aiCache?: AiReplyCache | null,
 ): Promise<SendGroupMessageResult> {
   // ACL：仅群组成员可发消息
   await assertGroupAccess(userId, groupId);
@@ -764,9 +766,52 @@ export async function sendGroupMessage(
     const selectedBots = hasMentions
       ? mentionedActiveBots
       : selectBotsForRound(bots, group.responseMode, content, group.maxConsecutiveBotReplies);
+
+    // 缓存键：群组 + 规范化内容 + 本轮选中 NPC id（顺序敏感）。
+    // 一次提问多人回答时，整轮回复作为一个整体缓存，命中后按原顺序回放全部 NPC。
+    const roundKey = cacheKey([groupId, content, selectedBots.map((b) => b.id).join(',')]);
+    const cachedRound = aiCache?.get<Array<{ botId: string; content: string }>>(roundKey);
+
+    // 缓存命中：直接按缓存内容落库并返回（不调用 AI、不查历史）
+    if (cachedRound) {
+      logger.info(
+        { groupId, roundKey, botReplies: cachedRound.length, cache: 'hit' },
+        'group: ai cache hit',
+      );
+      const cachedMessages: GroupMessageOutput[] = [];
+      for (const item of cachedRound) {
+        const saved = await prisma.groupMessage.create({
+          data: {
+            groupId,
+            roundId,
+            senderType: SenderType.BOT,
+            botId: item.botId,
+            content: item.content,
+            status: MessageStatus.SENT,
+          },
+        });
+        const savedWithSender = await prisma.groupMessage.findUnique({
+          where: { id: saved.id },
+          include: GROUP_MESSAGE_SENDER_INCLUDE,
+        });
+        cachedMessages.push(toGroupMessageOutput(savedWithSender!));
+      }
+      logger.info(
+        { groupId, roundId, userId, mode: group.responseMode, botReplies: cachedMessages.length },
+        'group: round completed (cache hit)',
+      );
+      return {
+        userMessage: toGroupMessageOutput(userMessageWithSender!),
+        botMessages: cachedMessages,
+      };
+    }
+
     const history = await buildGroupHistory(groupId, userMessage.id);
 
     const botMessages: GroupMessageOutput[] = [];
+    // 本轮各 NPC 的成功回复（整轮全部成功才写缓存，任一走兜底则整轮不缓存）
+    const roundReplies: Array<{ botId: string; content: string }> = [];
+    let usedFallback = false;
     for (const bot of selectedBots) {
       let replyText: string;
       try {
@@ -788,6 +833,7 @@ export async function sendGroupMessage(
           'group: bot reply failed, using fallback',
         );
         replyText = FALLBACK_REPLY;
+        usedFallback = true;
       }
       const saved = await prisma.groupMessage.create({
         data: {
@@ -804,6 +850,13 @@ export async function sendGroupMessage(
         include: GROUP_MESSAGE_SENDER_INCLUDE,
       });
       botMessages.push(toGroupMessageOutput(savedWithSender!));
+      roundReplies.push({ botId: bot.id, content: replyText });
+    }
+
+    // 整轮全部成功 → 写入缓存（下次相同问题可直接回放全部 NPC 回复）
+    if (!usedFallback && roundReplies.length > 0) {
+      aiCache?.set(roundKey, roundReplies);
+      logger.info({ groupId, roundKey, botReplies: roundReplies.length }, 'group: ai cache set');
     }
 
     logger.info(
@@ -861,6 +914,7 @@ export async function streamSendGroupMessage(
   input: { content: string; clientRequestId?: string },
   events: GroupMessageStreamEvents = {},
   clientSignal?: AbortSignal,
+  aiCache?: AiReplyCache | null,
 ): Promise<void> {
   // ACL：仅群组成员可发消息
   await assertGroupAccess(userId, groupId);
@@ -960,6 +1014,40 @@ export async function streamSendGroupMessage(
     const selectedBots = hasMentions
       ? mentionedActiveBots
       : selectBotsForRound(bots, group.responseMode, content, group.maxConsecutiveBotReplies);
+
+    // 缓存键：群组 + 内容 + 本轮选中 NPC id 顺序（与 sendGroupMessage 完全一致）
+    const roundKey = cacheKey([groupId, content, selectedBots.map((b) => b.id).join(',')]);
+    const cachedRound = aiCache?.get<Array<{ botId: string; content: string }>>(roundKey);
+
+    // 缓存命中：回放整轮（user_message + 各 NPC 的 botDone + round_done），
+    // 无增量流——前端在 botDone 时直接把最终消息追加进列表，表现与正常完成一致。
+    if (cachedRound) {
+      events.userMessage?.(toGroupMessageOutput(userMessageWithSender!));
+      for (const item of cachedRound) {
+        const saved = await prisma.groupMessage.create({
+          data: {
+            groupId,
+            roundId,
+            senderType: SenderType.BOT,
+            botId: item.botId,
+            content: item.content,
+            status: MessageStatus.SENT,
+          },
+        });
+        const savedWithSender = await prisma.groupMessage.findUnique({
+          where: { id: saved.id },
+          include: GROUP_MESSAGE_SENDER_INCLUDE,
+        });
+        events.botDone?.(toGroupMessageOutput(savedWithSender!));
+      }
+      events.roundDone?.();
+      logger.info(
+        { groupId, roundKey, botReplies: cachedRound.length, cache: 'hit' },
+        'group: stream round completed (cache hit)',
+      );
+      return;
+    }
+
     const history = await buildGroupHistory(groupId, userMessage.id);
     // 实际发言成员的用户名（Mock AI 回显「用户名说：」；ACL 保证发送者必然是成员）
     const senderName = group.members.find((m) => m.userId === userId)?.user.username ?? '用户';
@@ -967,6 +1055,9 @@ export async function streamSendGroupMessage(
     // 先通知前端人类消息已落库，再逐个机器人流式推送
     events.userMessage?.(toGroupMessageOutput(userMessageWithSender!));
 
+    // 本轮各 NPC 的成功回复（整轮全部成功才写缓存，任一走兜底则整轮不缓存）
+    const roundReplies: Array<{ botId: string; content: string }> = [];
+    let usedFallback = false;
     for (const bot of selectedBots) {
       // 每个机器人：先 PENDING 落库占位（拿到稳定消息 id），前端显示打字气泡
       const pending = await prisma.groupMessage.create({
@@ -1013,6 +1104,7 @@ export async function streamSendGroupMessage(
           { groupId, roundId, botId: bot.id, chars: saved.content.length },
           'group: stream bot reply saved',
         );
+        roundReplies.push({ botId: bot.id, content: partial });
         events.botDone?.(toGroupMessageOutput(savedWithSender!));
       } catch (err) {
         // 保证回复：生成失败/流中断时以兜底文案落库（不中断本轮其他机器人）。
@@ -1021,6 +1113,7 @@ export async function streamSendGroupMessage(
           { groupId, roundId, botId: bot.id, err },
           'group: stream bot reply failed, using fallback',
         );
+        usedFallback = true;
         const fallback = await prisma.groupMessage.update({
           where: { id: pending.id },
           data: { content: FALLBACK_REPLY, status: MessageStatus.SENT },
@@ -1031,6 +1124,15 @@ export async function streamSendGroupMessage(
         });
         events.botDone?.(toGroupMessageOutput(fallbackWithSender!));
       }
+    }
+
+    // 整轮全部成功 → 写入缓存（下次相同问题可直接回放全部 NPC 回复）
+    if (!usedFallback && roundReplies.length > 0) {
+      aiCache?.set(roundKey, roundReplies);
+      logger.info(
+        { groupId, roundKey, botReplies: roundReplies.length },
+        'group: stream ai cache set',
+      );
     }
 
     logger.info(

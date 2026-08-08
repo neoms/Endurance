@@ -20,6 +20,7 @@
 import { Router } from 'express';
 
 import { AiService } from '../../services/ai/ai.service.js';
+import type { AiReplyCache } from '../../services/ai/cache.js';
 import {
   addTagToConversation,
   createConversation,
@@ -48,10 +49,13 @@ import {
 /**
  * 创建对话路由组
  *
- * @param deps { aiService } AI 服务（发送消息使用）
+ * @param deps { aiService, aiCache? } AI 服务与回复缓存（相同问题回放上次回复）
  * @returns Router 已装配全部对话相关路由的 Express Router
  */
-export function createConversationsRouter(deps: { aiService: AiService }) {
+export function createConversationsRouter(deps: {
+  aiService: AiService;
+  aiCache?: AiReplyCache | null;
+}) {
   const conversationsRouter = Router();
 
   // 该路由组下所有接口都需要登录
@@ -528,6 +532,7 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
             aiError: (message) => sendSseEvent(res, 'ai_error', { message }),
           },
           controller.signal,
+          deps.aiCache,
         );
       } catch (err) {
         // 首个事件发出前的失败（404 等）：以 error 事件告知前端
@@ -549,6 +554,7 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
       conversationId,
       user.username,
       req.body,
+      deps.aiCache,
     );
     res.status(201).json(result);
   });

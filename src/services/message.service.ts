@@ -33,6 +33,7 @@ import type {
 } from '../types/message.js';
 import { buildContextHistory, MAX_CONTEXT_HISTORY } from './ai/context.js';
 import type { AiService } from './ai/ai.service.js';
+import { cacheKey, type AiReplyCache } from './ai/cache.js';
 import { toAiErrorInfo } from './ai/errors.js';
 import { assertConversationOwnership } from './conversation.service.js';
 
@@ -133,6 +134,7 @@ export async function sendMessage(
   conversationId: string,
   userName: string,
   input: SendMessageInput,
+  aiCache?: AiReplyCache | null,
 ): Promise<SendMessageResult> {
   // ACL：仅对话所有者可发送消息（锁外快速失败，避免非所有者阻塞在锁队列）
   await assertConversationOwnership(userId, conversationId);
@@ -195,9 +197,28 @@ export async function sendMessage(
       where: { id: conversationId },
       data: { updatedAt: new Date() },
     });
+
+    // 缓存键：对话 + 规范化内容（同一对话内相同问题可回放）
+    const cacheKeyStr = cacheKey([conversationId, content]);
+    const cachedReply = aiCache?.get<string>(cacheKeyStr);
+
+    // 第三步：缓存命中 → 直接回放上次回复（不调用 AI、不查历史，近乎瞬时返回）
+    if (cachedReply) {
+      logger.info({ conversationId, cacheKey: cacheKeyStr }, 'message: ai cache hit');
+      const aiMessage = await prisma.message.create({
+        data: {
+          conversationId,
+          senderType: SenderType.BOT,
+          content: cachedReply,
+          status: MessageStatus.SENT,
+        },
+      });
+      return { userMessage: toMessageOutput(userMessage), aiMessage: toMessageOutput(aiMessage) };
+    }
+
     const history = await buildHistory(conversationId, userMessage.id);
 
-    // 第三步：调用 AI（含重试与超时），并按结果落库
+    // 第四步：调用 AI（含重试与超时），并按结果落库
     let aiMessage: Message;
     try {
       const reply = await aiService.generateWithRetry({ content, history, userName });
@@ -209,7 +230,12 @@ export async function sendMessage(
           status: MessageStatus.SENT,
         },
       });
-      logger.info({ userId, conversationId, aiMessageId: aiMessage.id }, 'message: ai reply saved');
+      // 仅成功回复写入缓存；失败/兜底不缓存（避免把故障结果当正确答案回放）
+      aiCache?.set(cacheKeyStr, reply);
+      logger.info(
+        { userId, conversationId, aiMessageId: aiMessage.id, cacheKey: cacheKeyStr },
+        'message: ai reply saved (cache set)',
+      );
     } catch (err) {
       // 重试耗尽：以 FAILED 占位并记录错误信息，保证对话数据一致
       const info = toAiErrorInfo(err);
@@ -276,6 +302,7 @@ export async function streamSendMessage(
   input: SendMessageInput,
   events: MessageStreamEvents = {},
   clientSignal?: AbortSignal,
+  aiCache?: AiReplyCache | null,
 ): Promise<void> {
   // ACL：仅对话所有者可发送消息（锁外快速失败，避免非所有者阻塞在锁队列）
   await assertConversationOwnership(userId, conversationId);
@@ -339,6 +366,27 @@ export async function streamSendMessage(
       where: { id: conversationId },
       data: { updatedAt: new Date() },
     });
+
+    // 缓存键：对话 + 规范化内容
+    const cacheKeyStr = cacheKey([conversationId, content]);
+    const cachedReply = aiCache?.get<string>(cacheKeyStr);
+
+    // 缓存命中：直接落一条 SENT 回复并回放 aiDone（无增量流，近乎瞬时）
+    if (cachedReply) {
+      logger.info({ conversationId, cacheKey: cacheKeyStr }, 'message: stream ai cache hit');
+      const aiMessage = await prisma.message.create({
+        data: {
+          conversationId,
+          senderType: SenderType.BOT,
+          content: cachedReply,
+          status: MessageStatus.SENT,
+        },
+      });
+      events.userMessage?.(toMessageOutput(userMessage));
+      events.aiDone?.(toMessageOutput(aiMessage));
+      return;
+    }
+
     const history = await buildHistory(conversationId, userMessage.id);
 
     // 第三步：AI 回复先以 PENDING 落库占位（拿到稳定消息 id），
@@ -370,9 +418,11 @@ export async function streamSendMessage(
         where: { id: aiMessage.id },
         data: { content: partial, status: MessageStatus.SENT, errorCode: null, errorMessage: null },
       });
+      // 流式完整生成成功 → 写入缓存（仅成功回复）
+      aiCache?.set(cacheKeyStr, partial);
       logger.info(
         { userId, conversationId, aiMessageId: saved.id, chars: saved.content.length },
-        'message: stream ai reply saved',
+        'message: stream ai reply saved (cache set)',
       );
       events.aiDone?.(toMessageOutput(saved));
     } catch (err) {

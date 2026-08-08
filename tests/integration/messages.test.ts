@@ -23,6 +23,7 @@ import { AiService } from '../../src/services/ai/ai.service.js';
 import { MockAiProvider } from '../../src/services/ai/mock.provider.js';
 import type {
   AiGenerateContext,
+  AiGenerateOptions,
   AiGenerateResult,
   AiProvider,
 } from '../../src/services/ai/types.js';
@@ -45,6 +46,28 @@ class RecordingProvider implements AiProvider {
   async generate(context: AiGenerateContext): Promise<AiGenerateResult> {
     this.calls.push({ content: context.content, history: context.history ?? [] });
     return { content: '重试成功' };
+  }
+}
+
+/**
+ * 计数 Provider：每次 generate/stream 调用计数 +1，
+ * 回复内容携带调用序号，用于验证「缓存命中后不再调用 AI」。
+ */
+class CountingProvider implements AiProvider {
+  readonly name = 'counting';
+  calls = 0;
+
+  async generate(context: AiGenerateContext): Promise<AiGenerateResult> {
+    this.calls += 1;
+    return { content: `回复-${context.botName ?? 'AI'}-${context.content}-${this.calls}` };
+  }
+
+  async *stream(context: AiGenerateContext, _options?: AiGenerateOptions): AsyncIterable<string> {
+    // 分块产出完整回复（拼接结果与 generate 一致）
+    const reply = (await this.generate(context)).content;
+    for (let i = 0; i < reply.length; i += 8) {
+      yield reply.slice(i, i + 8);
+    }
   }
 }
 
@@ -566,5 +589,63 @@ describe('messages API', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ senderType: 'HUMAN', status: 'SENT' });
     expect(rows[1]).toMatchObject({ senderType: 'BOT', status: 'FAILED' });
+  });
+
+  it('replays the cached AI reply when the same question is asked again', async () => {
+    const provider = new CountingProvider();
+    const cacheApp = createApp({ aiService: new AiService(provider) });
+    const { token } = await registerUser(cacheApp, 'cacheuser');
+    const conv = await createConversation(cacheApp, token);
+    const id = conv.body.conversation.id as string;
+
+    const first = await request(cacheApp)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '同一个问题' });
+    const second = await request(cacheApp)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '同一个问题' });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    // 第二次回放首次回复（内容一致、状态 SENT）
+    expect(second.body.aiMessage.content).toBe(first.body.aiMessage.content);
+    expect(second.body.aiMessage.status).toBe('SENT');
+    // 缓存命中：AI 只被调用一次；两次请求各落一条用户消息 + 一条 AI 消息
+    expect(provider.calls).toBe(1);
+    const rows = await prisma.message.findMany({ where: { conversationId: id } });
+    expect(rows).toHaveLength(4);
+  });
+
+  it('replays cached reply via SSE without calling AI again', async () => {
+    const provider = new CountingProvider();
+    const cacheApp = createApp({ aiService: new AiService(provider) });
+    const { token } = await registerUser(cacheApp, 'cachestream');
+    const conv = await createConversation(cacheApp, token);
+    const id = conv.body.conversation.id as string;
+
+    // 第一次走 JSON 接口生成并写入缓存
+    const first = await request(cacheApp)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '同样的问题' });
+    // 第二次走流式接口：应命中缓存（无 ai_delta，直接 user_message → ai_done）
+    const second = await request(cacheApp)
+      .post(`/api/conversations/${id}/messages?stream=true`)
+      .set(auth(token))
+      .send({ content: '同样的问题' });
+
+    expect(second.status).toBe(200);
+    const events = parseSse(second.text);
+    const names = events.map((e) => e.event);
+    expect(names[0]).toBe('user_message');
+    expect(names).not.toContain('ai_delta');
+    expect(names[names.length - 1]).toBe('ai_done');
+    const done = events.find((e) => e.event === 'ai_done');
+    expect((done?.data as { message: { content: string } }).message.content).toBe(
+      first.body.aiMessage.content,
+    );
+    expect(provider.calls).toBe(1);
   });
 });

@@ -22,6 +22,7 @@ import { AiService } from '../../src/services/ai/ai.service.js';
 import { MockAiProvider } from '../../src/services/ai/mock.provider.js';
 import type {
   AiGenerateContext,
+  AiGenerateOptions,
   AiGenerateResult,
   AiProvider,
 } from '../../src/services/ai/types.js';
@@ -30,6 +31,27 @@ import { auth, parseSse, registerUser } from '../helpers.js';
 const app = createApp();
 // 故障应用：AI 必然失败，用于验证「保证机器人回复」的兜底逻辑
 const failingApp = createApp({ aiService: new AiService(new MockAiProvider({ failTimes: 99 })) });
+
+/**
+ * 计数 Provider：每次 generate/stream 调用计数 +1，
+ * 回复内容携带机器人名与调用序号，用于验证「整轮缓存回放不再调用 AI」。
+ */
+class CountingProvider implements AiProvider {
+  readonly name = 'counting';
+  calls = 0;
+
+  async generate(context: AiGenerateContext): Promise<AiGenerateResult> {
+    this.calls += 1;
+    return { content: `回复-${context.botName ?? 'AI'}-${context.content}-${this.calls}` };
+  }
+
+  async *stream(context: AiGenerateContext, _options?: AiGenerateOptions): AsyncIterable<string> {
+    const reply = (await this.generate(context)).content;
+    for (let i = 0; i < reply.length; i += 8) {
+      yield reply.slice(i, i + 8);
+    }
+  }
+}
 
 /**
  * 读取测试库中的机器人 id（globalSetup 已写入种子机器人）
@@ -724,5 +746,81 @@ describe('groups API', () => {
     expect((doneEvent?.data as { message: { content: string } }).message.content).toContain(
       '我暂时无法回答',
     );
+  });
+
+  it('replays all cached NPC replies for the same group question (cache hit)', async () => {
+    const provider = new CountingProvider();
+    const cacheApp = createApp({ aiService: new AiService(provider) });
+    const { token } = await registerUser(cacheApp, 'gcache');
+    const bots = await prisma.bot.findMany({ select: { id: true, code: true } });
+    const romilly = bots.find((b) => b.code === 'romilly');
+    const cooper = bots.find((b) => b.code === 'cooper');
+    const created = await request(cacheApp)
+      .post('/api/groups')
+      .set(auth(token))
+      .send({ name: '缓存群', botIds: [romilly!.id, cooper!.id], responseMode: 'ALL_BOTS' });
+    const groupId = created.body.group.id as string;
+
+    const first = await request(cacheApp)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '同一个群问题' });
+    const second = await request(cacheApp)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '同一个群问题' });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(first.body.botMessages).toHaveLength(2);
+    expect(second.body.botMessages).toHaveLength(2);
+    // 整轮回放：机器人顺序与内容与首次完全一致
+    expect(second.body.botMessages.map((m: { botId: string | null }) => m.botId)).toEqual(
+      first.body.botMessages.map((m: { botId: string | null }) => m.botId),
+    );
+    expect(second.body.botMessages.map((m: { content: string }) => m.content)).toEqual(
+      first.body.botMessages.map((m: { content: string }) => m.content),
+    );
+    // 两个 NPC 各只调用一次（第二轮整轮命中缓存）
+    expect(provider.calls).toBe(2);
+  });
+
+  it('replays the whole cached round via SSE for the same question', async () => {
+    const provider = new CountingProvider();
+    const cacheApp = createApp({ aiService: new AiService(provider) });
+    const { token } = await registerUser(cacheApp, 'gcachestream');
+    const bots = await prisma.bot.findMany({ select: { id: true, code: true } });
+    const romilly = bots.find((b) => b.code === 'romilly');
+    const cooper = bots.find((b) => b.code === 'cooper');
+    const created = await request(cacheApp)
+      .post('/api/groups')
+      .set(auth(token))
+      .send({ name: '缓存流式群', botIds: [romilly!.id, cooper!.id], responseMode: 'ALL_BOTS' });
+    const groupId = created.body.group.id as string;
+
+    // 第一次 JSON 生成并写入整轮缓存
+    const first = await request(cacheApp)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '同一个群问题' });
+    // 第二次流式：应命中缓存（无 bot_start/bot_delta，直接 bot_done 回放）
+    const second = await request(cacheApp)
+      .post(`/api/groups/${groupId}/messages?stream=true`)
+      .set(auth(token))
+      .send({ content: '同一个群问题' });
+
+    expect(second.status).toBe(200);
+    const events = parseSse(second.text);
+    const names = events.map((e) => e.event);
+    expect(names[0]).toBe('user_message');
+    expect(names).not.toContain('bot_start');
+    expect(names).not.toContain('bot_delta');
+    expect(names.filter((n) => n === 'bot_done')).toHaveLength(2);
+    expect(names[names.length - 1]).toBe('round_done');
+    const doneContents = events
+      .filter((e) => e.event === 'bot_done')
+      .map((e) => (e.data as { message: { content: string } }).message.content);
+    expect(doneContents).toEqual(first.body.botMessages.map((m: { content: string }) => m.content));
+    expect(provider.calls).toBe(2);
   });
 });

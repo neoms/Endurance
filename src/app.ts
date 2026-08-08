@@ -39,6 +39,7 @@ import { errorHandler, notFoundHandler } from './lib/errors.js';
 import { logger } from './lib/logger.js';
 import { healthRouter } from './routes/health.js';
 import { AiService } from './services/ai/ai.service.js';
+import { AiReplyCache } from './services/ai/cache.js';
 import { createDefaultAiProvider } from './services/ai/provider.factory.js';
 
 /**
@@ -60,6 +61,8 @@ export function createApp(options: AppOptions = {}) {
   // 默认 AI Provider：按环境变量选择 DeepSeek / Mock；测试可注入自定义实现
   const aiService =
     options.aiService ?? new AiService(createDefaultAiProvider(env.DEEPSEEK_API_KEY));
+  // AI 回复缓存：相同问题在 TTL 内直接回放上次回复（个人=单条，群组=整轮 NPC 回复）
+  const aiCache = new AiReplyCache(env.AI_CACHE_TTL_MS);
   const app = express();
 
   // 隐藏 X-Powered-By 响应头，降低技术栈信息泄露
@@ -81,8 +84,8 @@ export function createApp(options: AppOptions = {}) {
 
   // 业务路由：认证、个人对话、群组、机器人、AI 消息重试、健康检查
   app.use('/api/auth', authRouter);
-  app.use('/api/conversations', createConversationsRouter({ aiService }));
-  app.use('/api/groups', createGroupsRouter({ aiService }));
+  app.use('/api/conversations', createConversationsRouter({ aiService, aiCache }));
+  app.use('/api/groups', createGroupsRouter({ aiService, aiCache }));
   app.use('/api/bots', botsRouter);
   app.use('/api/messages', createMessagesRouter({ aiService }));
   app.use('/api/health', healthRouter);

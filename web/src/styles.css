@@ -377,14 +377,14 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
-  /* 吸底：滚动机器人列表时「取消/创建」始终可见，无需滚到底再操作 */
+  /* 吸底：滚动 NPC 列表时「取消/创建」始终可见，无需滚到底再操作 */
   position: sticky;
   bottom: 0;
   padding-top: 8px;
   background: var(--card);
 }
 
-/* 新建群组悬浮框：机器人选择卡片（名称 + 性格描述，选中态绿色高亮） */
+/* 新建群组悬浮框：NPC 选择卡片（名称 + 性格描述，选中态绿色高亮） */
 .bot-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -817,7 +817,7 @@ button:disabled {
   border: 1px solid #fecaca;
 }
 
-/* 流式「打字中」气泡：与普通机器人气泡同底色，仅追加闪烁光标 */
+/* 流式「打字中」气泡：与普通 NPC 气泡同底色，仅追加闪烁光标 */
 .bubble.streaming {
   min-height: 38px;
 }
@@ -1013,7 +1013,7 @@ button:disabled {
   margin-bottom: 8px;
 }
 
-/* 成员/机器人行：头像占位 + 名称/用户名两行信息 + 右侧操作按钮 */
+/* 成员/NPC 行：头像占位 + 名称/用户名两行信息 + 右侧操作按钮 */
 .member-row,
 .bot-row {
   display: flex;

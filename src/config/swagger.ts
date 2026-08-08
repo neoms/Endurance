@@ -223,12 +223,12 @@ const options: swaggerJsdoc.Options = {
             senderType: {
               type: 'string',
               enum: ['HUMAN', 'BOT'],
-              description: '发送者类型：HUMAN 人类 / BOT 机器人',
+              description: '发送者类型：HUMAN 人类 / BOT NPC',
             },
             senderUserId: {
               type: 'string',
               nullable: true,
-              description: '人类消息的作者 id；机器人消息为 null',
+              description: '人类消息的作者 id；NPC 消息为 null',
             },
             content: { type: 'string', description: '消息内容（AI 失败时为空串）' },
             status: {
@@ -301,9 +301,9 @@ const options: swaggerJsdoc.Options = {
           type: 'object',
           required: ['id', 'code', 'name', 'personality'],
           properties: {
-            id: { type: 'string', description: '机器人 id', example: 'cmxxxxxxx' },
+            id: { type: 'string', description: 'NPC id', example: 'cmxxxxxxx' },
             code: { type: 'string', description: '稳定标识', example: 'cooper' },
-            name: { type: 'string', description: '机器人名称', example: '库珀' },
+            name: { type: 'string', description: 'NPC 名称', example: '库珀' },
             personality: {
               type: 'string',
               description: '完整人设提示词（身份/性格/知识/说话风格/行为逻辑等）',
@@ -346,11 +346,11 @@ const options: swaggerJsdoc.Options = {
             responseMode: {
               type: 'string',
               enum: ['ALL_BOTS', 'RANDOM_ONE', 'CONTENT_ROUTED'],
-              description: '机器人响应策略',
+              description: 'NPC 响应策略',
             },
             maxConsecutiveBotReplies: {
               type: 'integer',
-              description: '每轮机器人回复数上限（防循环）',
+              description: '每轮 NPC 回复数上限（防循环）',
               example: 3,
             },
             createdAt: { type: 'string', format: 'date-time' },
@@ -380,7 +380,7 @@ const options: swaggerJsdoc.Options = {
             botIds: {
               type: 'array',
               minItems: 1,
-              description: '初始机器人 id 列表（至少 1 个）',
+              description: '初始 NPC id 列表（至少 1 个）',
               items: { type: 'string', example: 'cmxxxxxxx' },
             },
             responseMode: {
@@ -436,7 +436,7 @@ const options: swaggerJsdoc.Options = {
           type: 'object',
           required: ['botId'],
           properties: {
-            botId: { type: 'string', description: '机器人 id' },
+            botId: { type: 'string', description: 'NPC id' },
           },
         },
         // 群组消息（对外输出，含轮次标识）
@@ -454,15 +454,15 @@ const options: swaggerJsdoc.Options = {
             senderType: {
               type: 'string',
               enum: ['HUMAN', 'BOT'],
-              description: 'HUMAN 人类 / BOT 机器人',
+              description: 'HUMAN 人类 / BOT NPC',
             },
             userId: { type: 'string', nullable: true, description: '人类发言者 id' },
-            botId: { type: 'string', nullable: true, description: '机器人 id' },
+            botId: { type: 'string', nullable: true, description: 'NPC id' },
             senderName: {
               type: 'string',
               nullable: true,
               description:
-                '发送者展示名（真人=昵称，机器人=名称）；随消息返回，历史消息不因成员离开/机器人移除而丢失名字',
+                '发送者展示名（真人=昵称，NPC=名称）；随消息返回，历史消息不因成员离开/NPC 移除而丢失名字',
             },
             content: { type: 'string', description: '消息内容' },
             status: {
@@ -504,7 +504,7 @@ const options: swaggerJsdoc.Options = {
             userMessage: { $ref: '#/components/schemas/GroupMessage' },
             botMessages: {
               type: 'array',
-              description: '本轮机器人回复列表（受防循环上限约束）',
+              description: '本轮 NPC 回复列表（受防循环上限约束）',
               items: { $ref: '#/components/schemas/GroupMessage' },
             },
           },

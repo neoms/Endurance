@@ -26,13 +26,13 @@ botsRouter.use(authRequired);
  * /api/bots:
  *   get:
  *     tags: [Bots]
- *     summary: 机器人角色预设列表
- *     description: 返回全部启用的机器人角色（客服/技术/幽默等），供创建群组与添加机器人时选择。
+ *     summary: NPC 角色预设列表
+ *     description: 返回全部启用的 NPC 角色（星际穿越角色等），供创建群组与添加 NPC 时选择。
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       '200':
- *         description: 机器人角色列表
+ *         description: NPC 角色列表
  *         content:
  *           application/json:
  *             schema:

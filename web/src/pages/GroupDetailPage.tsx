@@ -2,11 +2,11 @@
  * 群组详情/群聊页
  *
  * 【交互】
- * - 左侧：群组信息（成员管理、机器人管理、离开群组）；
+ * - 左侧：群组信息（成员管理、NPC 管理、离开群组）；
  * - 左侧（创建者）：群组设置（名称/响应策略/每轮回复上限，保存调 PATCH）；
- * - 右侧：群聊窗口（人类/机器人发言，发送消息走 SSE 流式接口——
- *   每个机器人依次以 bot_start/bot_delta/bot_done 逐块渲染回复）；
- * - 成员可离开群组；创建者可添加/移除成员与机器人。
+ * - 右侧：群聊窗口（人类/NPC 发言，发送消息走 SSE 流式接口——
+ *   每个 NPC 依次以 bot_start/bot_delta/bot_done 逐块渲染回复）；
+ * - 成员可离开群组；创建者可添加/移除成员与 NPC。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -52,7 +52,7 @@ export default function GroupDetailPage() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
-  // 当前正在流式回复的机器人（一次只有一个）：messageId 对应后端 PENDING 消息，
+  // 当前正在流式回复的 NPC（一次只有一个）：messageId 对应后端 PENDING 消息，
   // content 累积增量文本，前端渲染「打字中」气泡
   const [streamingBot, setStreamingBot] = useState<{
     messageId: string;
@@ -83,8 +83,8 @@ export default function GroupDetailPage() {
   const isOwner = user !== null && group?.creatorId === user.id;
 
   /**
-   * @提及补全候选：当前群组成员（用户名）+ 群组机器人（名称），按前缀过滤。
-   * 说明：候选与后端校验规则一一对应——真人按用户名、机器人按名称，
+   * @提及补全候选：当前群组成员（用户名）+ 群组 NPC（名称），按前缀过滤。
+   * 说明：候选与后端校验规则一一对应——真人按用户名、NPC 按名称，
    * 因此这里列出的每一项都能被后端正确解析（@ 真人合法但不触发逻辑）。
    */
   const mentionCandidates = useMemo(() => {
@@ -107,7 +107,7 @@ export default function GroupDetailPage() {
       .map((b) => ({
         key: `bot:${b.id}`,
         label: b.name,
-        sub: '机器人',
+        sub: 'NPC',
         kind: 'bot' as const,
       }));
     return [...members, ...bots];
@@ -119,7 +119,7 @@ export default function GroupDetailPage() {
   }, [mentionQuery]);
 
   /**
-   * 加载群组详情、可用机器人与最近历史消息（默认返回最近 50 条，升序）
+   * 加载群组详情、可用 NPC 与最近历史消息（默认返回最近 50 条，升序）
    */
   const load = useCallback(async () => {
     if (!id) return;
@@ -190,20 +190,20 @@ export default function GroupDetailPage() {
   }, [streamingBot]);
 
   /**
-   * 机器人 id → 名称映射（兜底用）
+   * NPC id → 名称映射（兜底用）
    *
-   * 优先从「当前群组机器人」里找，其次从「全量机器人列表」找
-   * （机器人被移出群组后仍存在于全量列表，历史消息能显示原名）；
+   * 优先从「当前群组 NPC」里找，其次从「全量 NPC 列表」找
+   * （NPC 被移出群组后仍存在于全量列表，历史消息能显示原名）；
    * 正常路径下后端已在消息里返回 senderName，这里仅兜底。
    */
   const botNameById = (botId: string | null): string => {
-    if (!botId) return '机器人';
+    if (!botId) return 'NPC';
     const bot = group?.bots.find((b) => b.id === botId) ?? bots.find((b) => b.id === botId);
-    return bot?.name ?? '机器人';
+    return bot?.name ?? 'NPC';
   };
 
   /**
-   * 发送群组消息：追加人类消息与机器人回复
+   * 发送群组消息：追加人类消息与 NPC 回复
    *
    * @param e 表单提交事件
    */
@@ -217,7 +217,7 @@ export default function GroupDetailPage() {
     requestIdRef.current = requestId;
     try {
       // SSE 流式发送：user_message 追加人类消息；bot_start 创建「打字中」气泡，
-      // bot_delta 增量渲染，bot_done 固化最终消息并切换到下一个机器人
+      // bot_delta 增量渲染，bot_done 固化最终消息并切换到下一个 NPC
       await apiStream(
         `/groups/${id}/messages`,
         { content: input.trim(), clientRequestId: requestId },
@@ -230,7 +230,7 @@ export default function GroupDetailPage() {
             const message = (data as { message: GroupMessage }).message;
             setStreamingBot({
               messageId: message.id,
-              botName: message.senderName ?? botNameById(message.botId) ?? '机器人',
+              botName: message.senderName ?? botNameById(message.botId) ?? 'NPC',
               content: '',
             });
           },
@@ -244,7 +244,7 @@ export default function GroupDetailPage() {
             setStreamingBot(null);
           },
           round_done: () => {
-            // 本轮全部机器人回复完成：无需额外处理（sending 由 finally 复位）
+            // 本轮全部 NPC 回复完成：无需额外处理（sending 由 finally 复位）
           },
           error: (data) => {
             const err = (data as { error?: { message?: string } }).error;
@@ -267,7 +267,7 @@ export default function GroupDetailPage() {
   /**
    * 从候选列表中选择 @ 对象：用「@名称 」替换光标处未闭合的 @token
    *
-   * @param candidate 被选中的候选（真人用户名或机器人名称）
+   * @param candidate 被选中的候选（真人用户名或 NPC 名称）
    * 逻辑：定位光标前的 @ 起始位置 → 保留 @ 之前与光标之后的内容 →
    * 插入「@label 」→ 关闭候选列表并把光标移到插入文本末尾。
    */
@@ -330,7 +330,7 @@ export default function GroupDetailPage() {
   };
 
   /**
-   * 添加机器人（创建者）
+   * 添加 NPC（创建者）
    */
   const addBot = async () => {
     if (!id || !addBotId) return;
@@ -340,9 +340,9 @@ export default function GroupDetailPage() {
   };
 
   /**
-   * 移除机器人（创建者；至少保留 1 个）
+   * 移除 NPC（创建者；至少保留 1 个）
    *
-   * @param botId 机器人 id
+   * @param botId NPC id
    */
   const removeBot = async (botId: string) => {
     if (!id) return;
@@ -409,14 +409,14 @@ export default function GroupDetailPage() {
               // 其他人（含其他真人）的消息一律靠左并显示发言者名字
               const isMine = message.senderType === 'HUMAN' && message.userId === user?.id;
               // 发言者展示名：优先用后端随消息返回的 senderName（历史消息不因
-              // 成员离开/机器人移除而丢失名字），机器人消息再兜底查机器人列表
+              // 成员离开/NPC 移除而丢失名字），NPC 消息再兜底查 NPC 列表
               const senderName =
                 message.senderType === 'HUMAN'
                   ? (message.senderName ?? '用户')
                   : (message.senderName ?? botNameById(message.botId));
               return (
                 <div key={message.id} className={`message-row ${isMine ? 'user' : 'bot'}`}>
-                  {/* 非自己发的消息：头像在左（真人灰底 / 机器人绿底，首字占位） */}
+                  {/* 非自己发的消息：头像在左（真人灰底 / NPC 绿底，首字占位） */}
                   {!isMine && (
                     <div
                       className={`avatar-sm ${message.senderType === 'HUMAN' ? 'other' : 'bot'}`}
@@ -446,7 +446,7 @@ export default function GroupDetailPage() {
                 </div>
               );
             })}
-            {/* 流式进行中的机器人气泡：增量文本 + 闪烁光标 */}
+            {/* 流式进行中的 NPC 气泡：增量文本 + 闪烁光标 */}
             {streamingBot !== null && (
               <div className="message-row bot">
                 <div className="avatar-sm bot">
@@ -471,7 +471,7 @@ export default function GroupDetailPage() {
             {mentionQuery !== null && (
               <div className="mention-picker" onMouseDown={(e) => e.preventDefault()}>
                 {mentionCandidates.length === 0 ? (
-                  <div className="mention-picker-empty">没有匹配的用户或机器人</div>
+                  <div className="mention-picker-empty">没有匹配的用户或 NPC</div>
                 ) : (
                   mentionCandidates.map((candidate, index) => (
                     <button
@@ -504,7 +504,7 @@ export default function GroupDetailPage() {
                   const active = getActiveMention(value, caret);
                   setMentionQuery(active ? active.query : null);
                 }}
-                placeholder="发送消息，可 @机器人名 / @用户名…"
+                placeholder="发送消息，可 @NPC名 / @用户名…"
                 onKeyDown={(e) => {
                   // 中文输入法组合状态（选字上屏）不参与补全与发送
                   if (e.nativeEvent.isComposing) {
@@ -594,7 +594,7 @@ export default function GroupDetailPage() {
         </div>
 
         <div className="card">
-          <div className="card-title">机器人（{group?.bots.length ?? 0}）</div>
+          <div className="card-title">NPC（{group?.bots.length ?? 0}）</div>
           {group?.bots.map((bot) => (
             <div className="bot-row" key={bot.id}>
               <div className="bot-avatar">{bot.name.slice(0, 1)}</div>
@@ -612,7 +612,7 @@ export default function GroupDetailPage() {
           {isOwner && (
             <div className="item-row" style={{ marginTop: 10 }}>
               <select value={addBotId} onChange={(e) => setAddBotId(e.target.value)}>
-                <option value="">选择机器人…</option>
+                <option value="">选择 NPC…</option>
                 {bots
                   .filter((b) => !group?.bots.some((gb) => gb.id === b.id))
                   .map((b) => (
@@ -650,7 +650,7 @@ export default function GroupDetailPage() {
                 value={editResponseMode}
                 onChange={(e) => setEditResponseMode(e.target.value as typeof editResponseMode)}
               >
-                <option value="ALL_BOTS">全部机器人回复</option>
+                <option value="ALL_BOTS">全部 NPC 回复</option>
                 <option value="RANDOM_ONE">随机一个回复</option>
                 <option value="CONTENT_ROUTED">按内容路由</option>
               </select>
