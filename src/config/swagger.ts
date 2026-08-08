@@ -302,9 +302,13 @@ const options: swaggerJsdoc.Options = {
           required: ['id', 'code', 'name', 'personality'],
           properties: {
             id: { type: 'string', description: '机器人 id', example: 'cmxxxxxxx' },
-            code: { type: 'string', description: '稳定标识', example: 'customer-service' },
-            name: { type: 'string', description: '机器人名称', example: '客服机器人' },
-            personality: { type: 'string', description: '性格/回复倾向描述' },
+            code: { type: 'string', description: '稳定标识', example: 'cooper' },
+            name: { type: 'string', description: '机器人名称', example: '库珀' },
+            personality: {
+              type: 'string',
+              description: '完整人设提示词（身份/性格/知识/说话风格/行为逻辑等）',
+              example: '【身份】前NASA飞行员、工程师、农民…',
+            },
           },
         },
         // 群组成员（对外输出）

@@ -24,13 +24,15 @@ export type ChatRole = 'system' | 'user' | 'assistant';
  *
  * @param context AI 生成上下文（botName / personality 用于群组机器人人设）
  * @returns string 系统提示词：
- *   - 群组机器人（有 personality）：名字 + 性格/回复倾向 + 通用群聊约束；
+ *   - 群组机器人（有 personality）：名字 + 角色扮演指令 + 完整人设提示词（原样注入）；
  *   - 群组机器人（无 personality）：仅名字 + 通用群聊约束（兜底）；
  *   - 个人对话（无 botName）：通用助手提示。
  */
 export function buildSystemPrompt(context: AiGenerateContext): string {
   if (context.botName && context.personality) {
-    return `你是群组机器人「${context.botName}」。性格/回复倾向：${context.personality}。请用中文简洁自然地回复群聊消息，不要自称是 AI 助手。`;
+    // 人设提示词来自数据库 bots.personality（完整角色设定，见 prisma/seed.ts），
+    // 原样注入并明确「严格扮演、不跳出角色」，避免模型把长设定当普通上下文忽略。
+    return `你是群组机器人「${context.botName}」。请严格按照以下角色设定扮演，始终保持人设与说话风格，用中文回复，不要自称是 AI 助手：\n${context.personality}`;
   }
   if (context.botName) {
     return `你是群组机器人「${context.botName}」。请用中文简洁自然地回复群聊消息。`;
