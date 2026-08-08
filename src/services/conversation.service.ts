@@ -8,8 +8,14 @@
  *
  * 【标签设计】
  * - 标签按「用户 + 名称」规范化存储（tags 表唯一约束），同名标签不重复；
+ * - 标签名称统一 trim + 小写归一化（添加与筛选两侧一致，大小写/空格不影响匹配）；
  * - 通过关联表 conversation_tags 建立多对多关系；
- * - 多标签筛选为 AND 语义：对话必须同时拥有所有请求的标签。
+ * - 多标签筛选为 AND 语义：对话必须同时拥有所有请求的标签；
+ * - 移除标签或删除对话后，不再被任何对话引用的标签行会被清理（避免孤儿数据）。
+ *
+ * 【标题设计】
+ * - isDefaultTitle 标记：仅标记为默认标题的对话才会被首条用户消息自动替换标题，
+ *   用户手动设置过的标题（创建时指定或 PATCH 修改）永不覆盖。
  */
 import type { Conversation, ConversationTag, Prisma, Tag } from '@prisma/client';
 
@@ -94,10 +100,13 @@ export async function createConversation(
   userId: string,
   input: CreateConversationInput,
 ): Promise<ConversationOutput> {
+  // 创建时显式指定了标题 → 视为用户自定义，不允许首条消息自动替换
+  const title = input.title?.trim() || DEFAULT_CONVERSATION_TITLE;
   const conversation = await prisma.conversation.create({
     data: {
       userId,
-      title: input.title?.trim() || DEFAULT_CONVERSATION_TITLE,
+      title,
+      isDefaultTitle: !input.title?.trim(),
     },
     include: tagsInclude,
   });
@@ -118,9 +127,11 @@ export async function listConversations(
   userId: string,
   tagNames: string[] = [],
 ): Promise<ConversationOutput[]> {
+  // 与添加侧保持一致：筛选参数同样做 trim + 小写归一化，避免空格/大小写导致匹配不上
+  const normalizedTags = tagNames.map((name) => name.trim().toLowerCase()).filter(Boolean);
   const where: Prisma.ConversationWhereInput = { userId };
-  if (tagNames.length > 0) {
-    where.AND = tagNames.map((name) => ({
+  if (normalizedTags.length > 0) {
+    where.AND = normalizedTags.map((name) => ({
       tags: { some: { tag: { userId, name } } },
     }));
   }
@@ -172,7 +183,11 @@ export async function updateConversationTitle(
   await assertConversationOwnership(userId, conversationId);
   const conversation = await prisma.conversation.update({
     where: { id: conversationId },
-    data: { title: input.title.trim() },
+    data: {
+      title: input.title.trim(),
+      // 用户手动修改标题后标记为「非默认标题」，首条消息逻辑不再覆盖它
+      isDefaultTitle: false,
+    },
     include: tagsInclude,
   });
   logger.debug({ userId, conversationId }, 'conversation: title updated');
@@ -190,6 +205,10 @@ export async function updateConversationTitle(
 export async function deleteConversation(userId: string, conversationId: string): Promise<void> {
   await assertConversationOwnership(userId, conversationId);
   await prisma.conversation.delete({ where: { id: conversationId } });
+  // 清理孤儿标签：对话删除后其标签关联被级联删除，不再被任何对话引用的标签行一并清理
+  await prisma.tag.deleteMany({
+    where: { userId, conversations: { none: {} } },
+  });
   logger.info({ userId, conversationId }, 'conversation: deleted');
 }
 
@@ -211,7 +230,8 @@ export async function addTagToConversation(
 ): Promise<ConversationTagOutput> {
   await assertConversationOwnership(userId, conversationId);
 
-  const name = input.name.trim();
+  // 标签名归一化：trim + 小写，保证「工作」与「工作 」、「Work」与「work」是同一个标签
+  const name = input.name.trim().toLowerCase();
   const tag = await prisma.tag.upsert({
     where: { userId_name: { userId, name } },
     update: {},
@@ -249,5 +269,9 @@ export async function removeTagFromConversation(
   if (deleted.count === 0) {
     throw new AppError(404, 'TAG_NOT_FOUND', 'Tag not found on this conversation');
   }
+  // 清理孤儿标签：若该标签已不再被任何对话引用，则删除标签本身
+  await prisma.tag.deleteMany({
+    where: { id: tagId, conversations: { none: {} } },
+  });
   logger.debug({ userId, conversationId, tagId }, 'conversation: tag removed');
 }

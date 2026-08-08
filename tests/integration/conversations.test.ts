@@ -4,7 +4,8 @@
  * 覆盖：
  * - 对话 CRUD（默认标题/自定义标题/改标题/删除）；
  * - ACL 数据隔离（用户 B 访问/改/删用户 A 的对话与标签 → 404）；
- * - 标签：添加、多标签 AND 筛选、移除、越权 404；
+ * - 标签：添加、多标签 AND 筛选、移除、越权 404、名称归一化、孤儿标签清理；
+ * - 删除级联：对话删除后消息与标签关联一并清除；
  * - 入参校验 422。
  */
 import request from 'supertest';
@@ -197,5 +198,73 @@ describe('conversations API', () => {
 
     expect(addRes.status).toBe(404);
     expect(removeRes.status).toBe(404);
+  });
+
+  it('deletes conversation with its messages and tag links (cascade + orphan cleanup)', async () => {
+    const { token, user } = await registerUser(app, 'cascadeowner');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    await request(app)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '这条消息随对话一起删除' });
+    const added = await request(app)
+      .post(`/api/conversations/${id}/tags`)
+      .set(auth(token))
+      .send({ name: '临时' });
+    const tagId = added.body.tag.id as string;
+
+    const del = await request(app).delete(`/api/conversations/${id}`).set(auth(token));
+    expect(del.status).toBe(204);
+
+    // DB 层验证：消息、标签关联、孤儿标签全部被清除
+    const msgCount = await prisma.message.count({ where: { conversationId: id } });
+    const linkCount = await prisma.conversationTag.count({ where: { conversationId: id } });
+    const tagCount = await prisma.tag.count({ where: { id: tagId, userId: user.id } });
+    expect(msgCount).toBe(0);
+    expect(linkCount).toBe(0);
+    expect(tagCount).toBe(0);
+  });
+
+  it('cleans up orphaned tag rows after removing the last reference', async () => {
+    const { token, user } = await registerUser(app, 'tagcleanup');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+    const added = await request(app)
+      .post(`/api/conversations/${id}/tags`)
+      .set(auth(token))
+      .send({ name: '临时' });
+    const tagId = added.body.tag.id as string;
+
+    const removeRes = await request(app)
+      .delete(`/api/conversations/${id}/tags/${tagId}`)
+      .set(auth(token));
+    expect(removeRes.status).toBe(204);
+
+    const remaining = await prisma.tag.count({ where: { id: tagId, userId: user.id } });
+    expect(remaining).toBe(0);
+  });
+
+  it('normalizes tag names (trim + lowercase) on add and filter', async () => {
+    const { token } = await registerUser(app, 'tagnorm');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    // 添加时带前后空格与大小写：服务端应归一化为小写存储
+    await request(app)
+      .post(`/api/conversations/${id}/tags`)
+      .set(auth(token))
+      .send({ name: ' Work ' });
+    const detail = await request(app).get(`/api/conversations/${id}`).set(auth(token));
+    expect(detail.body.conversation.tags[0].name).toBe('work');
+
+    // 筛选时大小写不同、带空格也应命中同一标签
+    const filtered = await request(app)
+      .get('/api/conversations')
+      .query({ tag: '  WORK  ' })
+      .set(auth(token));
+    expect(filtered.body.conversations).toHaveLength(1);
+    expect(filtered.body.conversations[0].id).toBe(id);
   });
 });

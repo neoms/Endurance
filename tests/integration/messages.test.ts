@@ -4,6 +4,8 @@
  * 覆盖：
  * - 发送消息 → 用户消息 + AI 回复双写；
  * - 默认标题取首条用户消息（含超长截断）；
+ * - 手动设置过的标题不再被首条消息覆盖（含改回「新对话」的边界）；
+ * - 发送消息刷新对话 updatedAt（列表按最近活跃排序）；
  * - 历史消息按时间顺序返回；
  * - clientRequestId 幂等去重；
  * - 幂等键按对话隔离：跨用户复用不泄露他人消息、同用户跨对话互不影响；
@@ -78,6 +80,55 @@ describe('messages API', () => {
     const detail = await request(app).get(`/api/conversations/${id}`).set(auth(token));
     expect(detail.body.conversation.title.length).toBeLessThanOrEqual(31);
     expect(detail.body.conversation.title).toMatch(/…$/);
+  });
+
+  it('does not overwrite a manually customized title (even when set back to 新对话)', async () => {
+    const { token } = await registerUser(app, 'titlekeeper');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    // 用户手动把标题改回默认值「新对话」
+    await request(app).patch(`/api/conversations/${id}`).set(auth(token)).send({ title: '新对话' });
+    await request(app)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '这条消息不应覆盖标题' });
+
+    const detail = await request(app).get(`/api/conversations/${id}`).set(auth(token));
+    expect(detail.body.conversation.title).toBe('新对话');
+  });
+
+  it('does not overwrite a custom title set at creation', async () => {
+    const { token } = await registerUser(app, 'titlecustom');
+    const conv = await createConversation(app, token, '自定义标题');
+    const id = conv.body.conversation.id as string;
+
+    await request(app)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '首条消息' });
+
+    const detail = await request(app).get(`/api/conversations/${id}`).set(auth(token));
+    expect(detail.body.conversation.title).toBe('自定义标题');
+  });
+
+  it('bumps conversation updatedAt when a message is sent (recent activity ordering)', async () => {
+    const { token } = await registerUser(app, 'bumpuser');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    const before = (await request(app).get(`/api/conversations/${id}`).set(auth(token))).body
+      .conversation.updatedAt as string;
+    // 稍等片刻，确保时间戳可区分
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await request(app)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '新消息' });
+
+    const after = (await request(app).get(`/api/conversations/${id}`).set(auth(token))).body
+      .conversation.updatedAt as string;
+    expect(new Date(after).getTime()).toBeGreaterThan(new Date(before).getTime());
   });
 
   it('lists messages in chronological order', async () => {

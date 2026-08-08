@@ -9,7 +9,9 @@
  * 4. clientRequestId 幂等：同一对话内相同键重复提交直接返回首次结果，不产生重复消息；
  *    幂等键唯一约束限定为 (conversationId, clientRequestId) 复合键——查找时天然
  *    限定在已通过所有权校验的对话内，避免跨用户/跨对话误命中造成数据泄露或丢失；
- * 5. 对话仍为默认标题时，首条用户消息（超长截断）自动设为标题。
+ * 5. 对话仍为默认标题（isDefaultTitle=true）时，首条用户消息（超长截断）自动设为标题，
+ *    并立刻把标记置为 false——用户手动设置过的标题永不覆盖；
+ * 6. 用户消息落库后同步刷新 conversation.updatedAt，使对话列表按「最近活跃」排序。
  *
  * 【ACL】
  * 所有操作都经过 assertConversationOwnership（跨用户访问 404）或消息归属校验。
@@ -27,7 +29,7 @@ import type {
 } from '../types/message.js';
 import type { AiService } from './ai/ai.service.js';
 import { toAiErrorInfo } from './ai/errors.js';
-import { assertConversationOwnership, DEFAULT_CONVERSATION_TITLE } from './conversation.service.js';
+import { assertConversationOwnership } from './conversation.service.js';
 
 // 默认标题截断长度（首条用户消息用作标题）
 const MAX_TITLE_LENGTH = 30;
@@ -59,17 +61,18 @@ function toMessageOutput(message: Message): MessageOutput {
  * @param conversationId 对话 id
  * @param content        用户消息内容
  * @returns Promise<void>
- * 说明：仅当标题仍是默认值「新对话」时才替换，用户手动改过的标题不会被覆盖。
+ * 说明：仅当 isDefaultTitle=true（创建时未指定标题且从未手动修改）时才替换。
+ * 通过 updateMany 的复合条件保证并发安全：只有一个请求能把默认标题消费掉；
+ * 无论是否替换成功，都不影响用户消息已落库这一事实。
  */
 async function maybeSetDefaultTitle(conversationId: string, content: string): Promise<void> {
-  const conversation = await prisma.conversation.findUnique({
-    where: { id: conversationId },
-    select: { title: true },
+  const title =
+    content.length > MAX_TITLE_LENGTH ? `${content.slice(0, MAX_TITLE_LENGTH)}…` : content;
+  const updated = await prisma.conversation.updateMany({
+    where: { id: conversationId, isDefaultTitle: true },
+    data: { title, isDefaultTitle: false },
   });
-  if (conversation?.title === DEFAULT_CONVERSATION_TITLE) {
-    const title =
-      content.length > MAX_TITLE_LENGTH ? `${content.slice(0, MAX_TITLE_LENGTH)}…` : content;
-    await prisma.conversation.update({ where: { id: conversationId }, data: { title } });
+  if (updated.count > 0) {
     logger.debug({ conversationId, title }, 'message: default title replaced by first message');
   }
 }
@@ -157,8 +160,12 @@ export async function sendMessage(
     },
   });
 
-  // 第二步：更新默认标题并构建上下文
+  // 第二步：若仍为默认标题则替换为首条消息，并刷新对话 updatedAt（列表按最近活跃排序）
   await maybeSetDefaultTitle(conversationId, content);
+  await prisma.conversation.update({
+    where: { id: conversationId },
+    data: { updatedAt: new Date() },
+  });
   const history = await buildHistory(conversationId);
 
   // 第三步：调用 AI（含重试与超时），并按结果落库

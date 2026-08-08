@@ -54,6 +54,9 @@ model Conversation {
   id        String   @id @default(cuid())
   userId    String // 所属用户（ACL 关键字段）
   title     String // 标题：创建时默认「新对话」，首条用户消息会替换它
+  // 是否为「未自定义的默认标题」：默认 true；用户创建时指定标题或 PATCH 改标题后置 false。
+  // 作用：只有默认标题才允许被首条用户消息自动替换，用户手动设置过的标题永不覆盖。
+  isDefaultTitle Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt // 对话列表按此字段倒序
 
