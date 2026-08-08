@@ -1,0 +1,80 @@
+/**
+ * 提示词模块单元测试
+ *
+ * 覆盖：
+ * - 系统提示：群组机器人（含/不含 personality）、个人对话通用提示；
+ * - 消息组装：system + 历史 + 当前用户消息（含/不含用户名前缀）；
+ * - 滑动窗口摘要（system 角色）按原顺序透传。
+ */
+import { describe, expect, it } from 'vitest';
+
+import { buildChatMessages, buildSystemPrompt } from '../../src/services/ai/prompts.js';
+import type { AiGenerateContext } from '../../src/services/ai/types.js';
+
+describe('buildSystemPrompt', () => {
+  it('injects bot name and personality for group bots', () => {
+    const prompt = buildSystemPrompt({
+      content: 'hi',
+      botName: '技术机器人',
+      personality: '严谨、专业，喜欢讲原理',
+    });
+
+    expect(prompt).toContain('技术机器人');
+    expect(prompt).toContain('严谨、专业，喜欢讲原理');
+    expect(prompt).toContain('不要自称是 AI 助手');
+  });
+
+  it('falls back to name-only prompt when personality is missing', () => {
+    const prompt = buildSystemPrompt({ content: 'hi', botName: '客服机器人' });
+
+    expect(prompt).toContain('客服机器人');
+    expect(prompt).not.toContain('性格/回复倾向');
+  });
+
+  it('uses the generic assistant prompt for personal chats', () => {
+    const prompt = buildSystemPrompt({ content: 'hi' });
+
+    expect(prompt).toContain('乐于助人的 AI 助手');
+    expect(prompt).not.toContain('群组机器人');
+  });
+});
+
+describe('buildChatMessages', () => {
+  it('assembles system + history + user message with userName prefix', () => {
+    const context: AiGenerateContext = {
+      content: '你好',
+      botName: '技术机器人',
+      userName: 'alice',
+      history: [{ role: 'user', content: '昨天的问题' }],
+    };
+    const messages = buildChatMessages(context);
+
+    expect(messages).toHaveLength(3);
+    expect(messages[0]).toMatchObject({ role: 'system' });
+    expect(messages[0]?.content).toContain('技术机器人');
+    expect(messages[1]).toEqual({ role: 'user', content: '昨天的问题' });
+    // 当前用户消息带「用户名：」前缀
+    expect(messages[2]).toEqual({ role: 'user', content: 'alice：你好' });
+  });
+
+  it('does not prefix userName when absent (personal chat)', () => {
+    const messages = buildChatMessages({ content: '你好' });
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toEqual({ role: 'user', content: '你好' });
+  });
+
+  it('passes the sliding-window summary (system role) through as history', () => {
+    const messages = buildChatMessages({
+      content: '继续',
+      history: [
+        { role: 'system', content: '[历史消息摘要 · 共 10 条] …' },
+        { role: 'user', content: 'alice：最新一条' },
+      ],
+    });
+
+    // system(人设) + system(摘要) + user(历史) + user(当前消息)
+    expect(messages.map((m) => m.role)).toEqual(['system', 'system', 'user', 'user']);
+    expect(messages[1]?.content).toContain('历史消息摘要');
+  });
+});

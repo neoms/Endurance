@@ -23,14 +23,15 @@ export interface AiProvider {
  * @property personality 机器人性格描述（可选，供真实 AI 参考人设）
  * @property userName    人类发送者的用户名（可选；供 Mock 回显「用户名说：」时使用，
  *                       不再写死「你说」）
- * @property history     最近对话历史（role: user/assistant），供上下文理解
+ * @property history     最近对话历史（role: system/user/assistant，供上下文理解；
+ *                       system 角色用于滑动窗口产生的历史摘要，见 context.ts）
  */
 export interface AiGenerateContext {
   content: string;
   botName?: string;
   personality?: string;
   userName?: string;
-  history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  history?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
 }
 
 /**

@@ -39,7 +39,7 @@ class RecordingProvider implements AiProvider {
   readonly name = 'recording';
   calls: Array<{
     content: string;
-    history: Array<{ role: 'user' | 'assistant'; content: string }>;
+    history: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   }> = [];
 
   async generate(context: AiGenerateContext): Promise<AiGenerateResult> {

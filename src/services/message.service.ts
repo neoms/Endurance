@@ -31,14 +31,13 @@ import type {
   SendMessageInput,
   SendMessageResult,
 } from '../types/message.js';
+import { buildContextHistory, MAX_CONTEXT_HISTORY } from './ai/context.js';
 import type { AiService } from './ai/ai.service.js';
 import { toAiErrorInfo } from './ai/errors.js';
 import { assertConversationOwnership } from './conversation.service.js';
 
 // 默认标题截断长度（首条用户消息用作标题）
 const MAX_TITLE_LENGTH = 30;
-// 提供给 AI 的上下文消息条数
-const HISTORY_SIZE = 10;
 // 对话级互斥锁：同一对话同时只允许一个「发送轮次」执行（见文件头第 7 条设计说明）
 const conversationLocks = createKeyedLock();
 
@@ -87,20 +86,31 @@ async function maybeSetDefaultTitle(conversationId: string, content: string): Pr
  * 构建最近对话上下文（排除失败的 AI 消息，按时间升序）
  *
  * @param conversationId 对话 id
+ * @param excludeMessageId 可选：排除某条消息（发送流程用它排除「刚落库的当前消息」，
+ *                         避免当前消息在 history 与 content 里重复出现两次）
  * @returns Promise<Array<{ role, content }>> 供 AI 理解上下文
+ * 说明：先取最近 MAX_CONTEXT_HISTORY（20）条，再交给 buildContextHistory
+ * 应用滑动窗口/总结（只影响上下文，不影响历史展示）。
  */
 async function buildHistory(
   conversationId: string,
-): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> {
+  excludeMessageId?: string,
+): Promise<Array<{ role: 'system' | 'user' | 'assistant'; content: string }>> {
   const recent = await prisma.message.findMany({
-    where: { conversationId, status: { not: MessageStatus.FAILED } },
+    where: {
+      conversationId,
+      status: { not: MessageStatus.FAILED },
+      ...(excludeMessageId ? { id: { not: excludeMessageId } } : {}),
+    },
     orderBy: { createdAt: 'desc' },
-    take: HISTORY_SIZE,
+    take: MAX_CONTEXT_HISTORY,
   });
-  return recent.reverse().map((m) => ({
+  const messages = recent.reverse().map((m) => ({
     role: m.senderType === SenderType.HUMAN ? ('user' as const) : ('assistant' as const),
     content: m.content,
   }));
+  // 滑动窗口 + 总结：达到阈值时用摘要替换最早部分，保留最近 5 条原文
+  return buildContextHistory(messages);
 }
 
 /**
@@ -185,7 +195,7 @@ export async function sendMessage(
       where: { id: conversationId },
       data: { updatedAt: new Date() },
     });
-    const history = await buildHistory(conversationId);
+    const history = await buildHistory(conversationId, userMessage.id);
 
     // 第三步：调用 AI（含重试与超时），并按结果落库
     let aiMessage: Message;
@@ -339,7 +349,7 @@ export async function retryAiMessage(
     orderBy: { createdAt: 'desc' },
   });
 
-  // 取失败消息之前的历史（排除 FAILED，最多 HISTORY_SIZE 条）作为重试的多轮上下文，
+  // 取失败消息之前的历史（排除 FAILED，最多 MAX_CONTEXT_HISTORY 条）作为重试的多轮上下文，
   // 与正常发送消息的 buildHistory 行为保持一致，避免重试退化为单轮回答。
   const history = await prisma.message.findMany({
     where: {
@@ -348,12 +358,14 @@ export async function retryAiMessage(
       status: { not: MessageStatus.FAILED },
     },
     orderBy: { createdAt: 'desc' },
-    take: HISTORY_SIZE,
+    take: MAX_CONTEXT_HISTORY,
   });
-  const contextHistory = history.reverse().map((m) => ({
-    role: m.senderType === SenderType.HUMAN ? ('user' as const) : ('assistant' as const),
-    content: m.content,
-  }));
+  const contextHistory = buildContextHistory(
+    history.reverse().map((m) => ({
+      role: m.senderType === SenderType.HUMAN ? ('user' as const) : ('assistant' as const),
+      content: m.content,
+    })),
+  );
 
   try {
     const reply = await aiService.generateWithRetry({

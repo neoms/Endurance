@@ -20,6 +20,11 @@ import { createApp } from '../../src/app.js';
 import { prisma } from '../../src/lib/prisma.js';
 import { AiService } from '../../src/services/ai/ai.service.js';
 import { MockAiProvider } from '../../src/services/ai/mock.provider.js';
+import type {
+  AiGenerateContext,
+  AiGenerateResult,
+  AiProvider,
+} from '../../src/services/ai/types.js';
 import { auth, registerUser } from '../helpers.js';
 
 const app = createApp();
@@ -522,6 +527,54 @@ describe('groups API', () => {
     );
     expect(humorMessage).toBeDefined();
     expect(humorMessage.senderName).toBe(humor!.name);
+  });
+
+  it('passes speaker-prefixed history to the AI as context', async () => {
+    // 捕获每次 AI 调用的上下文，验证历史消息带「用户名/机器人名：」前缀
+    const contexts: AiGenerateContext[] = [];
+    const capturingProvider: AiProvider = {
+      name: 'capturing',
+      async generate(context: AiGenerateContext): Promise<AiGenerateResult> {
+        contexts.push(context);
+        return { content: '收到' };
+      },
+    };
+    const capturingApp = createApp({ aiService: new AiService(capturingProvider) });
+    const { token } = await registerUser(capturingApp, 'groupowner');
+    const bots = await prisma.bot.findMany({ select: { id: true, code: true, name: true } });
+    const tech = bots.find((b) => b.code === 'tech');
+    const humor = bots.find((b) => b.code === 'humor');
+    expect(tech).toBeDefined();
+    expect(humor).toBeDefined();
+
+    const created = await request(capturingApp)
+      .post('/api/groups')
+      .set(auth(token))
+      .send({ name: 'g', botIds: [tech!.id, humor!.id], responseMode: 'ALL_BOTS' });
+    const groupId = created.body.group.id as string;
+
+    // 第一轮：人类消息 + 2 个机器人回复
+    await request(capturingApp)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '大家好' });
+    // 清空第一轮的调用记录，只验证第二轮携带的历史上下文
+    contexts.length = 0;
+
+    const second = await request(capturingApp)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '继续讨论' });
+
+    expect(second.status).toBe(201);
+    expect(contexts).toHaveLength(2); // 两个机器人各一次调用
+    const history = contexts[0]!.history ?? [];
+    // 上下文历史 = 第一轮的 3 条消息（当前消息已被排除，避免重复）
+    expect(history).toHaveLength(3);
+    expect(history[0]?.content).toBe('groupowner：大家好');
+    const botContents = history.slice(1).map((h) => h.content);
+    expect(botContents.some((c) => c.startsWith(`${tech!.name}：收到`))).toBe(true);
+    expect(botContents.some((c) => c.startsWith(`${humor!.name}：收到`))).toBe(true);
   });
 
   it('prevents bot loops: bot replies never trigger new rounds and max cap applies', async () => {

@@ -15,3 +15,7 @@ process.env.NODE_ENV = 'test';
 process.env.DATABASE_URL = 'file:./test.db';
 process.env.JWT_SECRET = 'test-secret-at-least-16-chars';
 process.env.LOG_LEVEL = 'silent';
+// 测试必须使用 Mock AI，绝不能调用真实 DeepSeek 接口：
+// 把 key 置空后（dotenv 不会覆盖已存在的环境变量），
+// 即使开发者本地 .env 配置了 DEEPSEEK_API_KEY，测试也始终回退到 MockAiProvider。
+process.env.DEEPSEEK_API_KEY = '';

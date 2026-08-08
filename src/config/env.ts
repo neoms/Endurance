@@ -31,6 +31,19 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(16).default('dev-only-secret-do-not-use-in-production'),
   // JWT 有效期（jsonwebtoken 时间字符串，例如 24h）
   JWT_EXPIRES_IN: z.string().default('24h'),
+  // DeepSeek API Key（可选）：配置后所有 AI 调用接入真实 DeepSeek 大模型；
+  // 留空或未配置时自动回退到 MockAiProvider（模拟回复），保证零配置可运行。
+  // 注意：生产环境务必通过环境变量注入，不要提交到代码仓库。
+  DEEPSEEK_API_KEY: z
+    .string()
+    .trim()
+    .optional()
+    // 空串与未配置等价：统一归一化为 undefined，避免误判为「已配置」
+    .transform((value) => (value ? value : undefined)),
+  // DeepSeek API 基础地址（默认官方地址；兼容自定义网关/代理）
+  DEEPSEEK_BASE_URL: z.string().url().default('https://api.deepseek.com'),
+  // DeepSeek 模型名（deepseek-chat 为通用对话模型）
+  DEEPSEEK_MODEL: z.string().trim().min(1).default('deepseek-chat'),
 });
 
 // 由 Schema 推导出的环境变量类型（供全局引用）

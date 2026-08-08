@@ -55,12 +55,11 @@ import type {
   SendGroupMessageResult,
   UpdateGroupInput,
 } from '../types/group.js';
+import { buildContextHistory, MAX_CONTEXT_HISTORY } from './ai/context.js';
 import type { AiService } from './ai/ai.service.js';
 
 // 机器人生成失败时的兜底文案（保证人类消息后必有回复）
 const FALLBACK_REPLY = '我暂时无法回答，请稍后再试。';
-// 提供给机器人的上下文消息条数
-const GROUP_HISTORY_SIZE = 10;
 
 // 群组级 in-flight 锁：同一群组同时只允许一个生成轮次（复用共享键级锁工具）
 const groupLocks = createKeyedLock();
@@ -586,20 +585,47 @@ export async function removeBotFromGroup(
  * 构建群组最近消息上下文（供机器人参考）
  *
  * @param groupId 群组 id
- * @returns Promise<Array<{ role, content }>> 最近消息（时间升序）
+ * @param excludeMessageId 可选：排除某条消息（发送流程用它排除「刚落库的当前人类消息」，
+ *                         避免当前消息在 history 与 content 里重复出现两次）
+ * @returns Promise<Array<{ role, content }>> 上下文历史（时间升序，已应用滑动窗口/总结）
+ * 说明：
+ * - 真人消息带「用户名：」前缀、机器人消息带「机器人名：」前缀——
+ *   历史消息（尤其机器人发言）若不带名字，模型无法区分是谁说的
+ *   （DeepSeek 回复本身不携带机器人名字，与 Mock 不同）；
+ * - 取最近 MAX_CONTEXT_HISTORY（20）条后交给 buildContextHistory 应用
+ *   滑动窗口/总结（只影响上下文，不影响历史展示）。
  */
 async function buildGroupHistory(
   groupId: string,
-): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> {
+  excludeMessageId?: string,
+): Promise<Array<{ role: 'system' | 'user' | 'assistant'; content: string }>> {
   const recent = await prisma.groupMessage.findMany({
-    where: { groupId },
+    where: { groupId, ...(excludeMessageId ? { id: { not: excludeMessageId } } : {}) },
     orderBy: { createdAt: 'desc' },
-    take: GROUP_HISTORY_SIZE,
+    take: MAX_CONTEXT_HISTORY,
+    include: {
+      user: { select: { username: true, displayName: true } },
+      bot: { select: { name: true } },
+    },
   });
-  return recent.reverse().map((m) => ({
-    role: m.senderType === SenderType.HUMAN ? ('user' as const) : ('assistant' as const),
-    content: m.content,
-  }));
+  const messages = recent.reverse().map((m) => {
+    if (m.senderType === SenderType.HUMAN) {
+      // 真人历史消息：带用户名前缀（与当前消息的「用户名：」前缀保持一致）
+      const name = m.user?.username ?? m.user?.displayName;
+      return {
+        role: 'user' as const,
+        content: name ? `${name}：${m.content}` : m.content,
+      };
+    }
+    // 机器人历史消息：带机器人名前缀（需求：群组历史机器人发言加名字前缀）
+    const botName = m.bot?.name;
+    return {
+      role: 'assistant' as const,
+      content: botName ? `${botName}：${m.content}` : m.content,
+    };
+  });
+  // 滑动窗口 + 总结：达到阈值时用摘要替换最早部分，保留最近 5 条原文
+  return buildContextHistory(messages);
 }
 
 /**
@@ -738,7 +764,7 @@ export async function sendGroupMessage(
     const selectedBots = hasMentions
       ? mentionedActiveBots
       : selectBotsForRound(bots, group.responseMode, content, group.maxConsecutiveBotReplies);
-    const history = await buildGroupHistory(groupId);
+    const history = await buildGroupHistory(groupId, userMessage.id);
 
     const botMessages: GroupMessageOutput[] = [];
     for (const bot of selectedBots) {

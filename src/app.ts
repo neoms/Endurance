@@ -12,7 +12,9 @@
  *
  * 【依赖注入】
  * AppOptions.aiService 可注入自定义 AI 服务；测试用它注入「必然失败」的
- * Provider 验证 AI 失败一致性与群组兜底回复逻辑。默认使用 MockAiProvider。
+ * Provider 验证 AI 失败一致性与群组兜底回复逻辑。
+ * 默认 Provider 由 createDefaultAiProvider 按配置选择：配置了 DEEPSEEK_API_KEY
+ * 时使用真实 DeepSeek 大模型，否则回退 MockAiProvider（模拟回复）。
  *
  * 【挂载顺序说明】
  * Swagger UI 依赖内联脚本，而 helmet 默认 CSP 禁止内联脚本；
@@ -31,12 +33,13 @@ import { botsRouter } from './api/routes/bots.js';
 import { createConversationsRouter } from './api/routes/conversations.js';
 import { createGroupsRouter } from './api/routes/groups.js';
 import { createMessagesRouter } from './api/routes/messages.js';
+import { env } from './config/env.js';
 import { swaggerSpec } from './config/swagger.js';
 import { errorHandler, notFoundHandler } from './lib/errors.js';
 import { logger } from './lib/logger.js';
 import { healthRouter } from './routes/health.js';
 import { AiService } from './services/ai/ai.service.js';
-import { MockAiProvider } from './services/ai/mock.provider.js';
+import { createDefaultAiProvider } from './services/ai/provider.factory.js';
 
 /**
  * 应用构建选项
@@ -54,8 +57,9 @@ export interface AppOptions {
  * @returns 配置完成的 Express 应用实例（尚未监听端口，监听由 src/server.ts 负责）
  */
 export function createApp(options: AppOptions = {}) {
-  // 默认使用 Mock AI Provider；测试可注入自定义实现
-  const aiService = options.aiService ?? new AiService(new MockAiProvider());
+  // 默认 AI Provider：按环境变量选择 DeepSeek / Mock；测试可注入自定义实现
+  const aiService =
+    options.aiService ?? new AiService(createDefaultAiProvider(env.DEEPSEEK_API_KEY));
   const app = express();
 
   // 隐藏 X-Powered-By 响应头，降低技术栈信息泄露
