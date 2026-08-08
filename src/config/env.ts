@@ -42,8 +42,9 @@ const envSchema = z.object({
     .transform((value) => (value ? value : undefined)),
   // DeepSeek API 基础地址（默认官方地址；兼容自定义网关/代理）
   DEEPSEEK_BASE_URL: z.string().url().default('https://api.deepseek.com'),
-  // DeepSeek 模型名（deepseek-chat 为通用对话模型）
-  DEEPSEEK_MODEL: z.string().trim().min(1).default('deepseek-chat'),
+  // DeepSeek 模型名（deepseek-v4-flash 为 V4 快速模型；
+  // 应用固定关闭思考模式以换取低延迟，见 DeepSeekProvider）
+  DEEPSEEK_MODEL: z.string().trim().min(1).default('deepseek-v4-flash'),
 });
 
 // 由 Schema 推导出的环境变量类型（供全局引用）

@@ -30,7 +30,7 @@ import type {
  *
  * @property apiKey    DeepSeek API Key（必须）
  * @property baseUrl   API 基础地址（默认 https://api.deepseek.com，末尾自动去斜杠）
- * @property model     模型名（默认 deepseek-chat）
+ * @property model     模型名（默认 deepseek-v4-flash，思考模式由请求体显式关闭）
  * @property fetchImpl 可注入的 fetch 实现（单元测试用；缺省用全局 fetch）
  */
 export interface DeepSeekProviderOptions {
@@ -66,7 +66,7 @@ export class DeepSeekProvider implements AiProvider {
   constructor(private readonly options: DeepSeekProviderOptions) {
     // 去掉末尾斜杠，保证拼出的 URL 为 {baseUrl}/chat/completions
     this.baseUrl = (options.baseUrl ?? 'https://api.deepseek.com').replace(/\/+$/, '');
-    this.model = options.model ?? 'deepseek-chat';
+    this.model = options.model ?? 'deepseek-v4-flash';
     // 注入 fetchImpl 便于测试；生产环境使用全局 fetch（Node 24 内置）
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
@@ -103,6 +103,11 @@ export class DeepSeekProvider implements AiProvider {
           temperature: 0.8,
           max_tokens: 1024,
           stream: false,
+          // deepseek-v4-flash 默认开启思考模式；本应用按需求显式关闭，
+          // 换取更低延迟与更快响应（快速问答场景不需要深度推理）。
+          // 注意：thinking 开关仅 V4 系列支持；其他模型（如 deepseek-chat）
+          // 不携带该字段，避免上游对未知参数报错。
+          ...(this.model.startsWith('deepseek-v4') ? { thinking: { type: 'disabled' } } : {}),
         }),
         // 把 AiService 的超时取消信号透传给 fetch：超时后底层请求被真正中止
         signal: options?.signal,

@@ -64,6 +64,7 @@ describe('DeepSeekProvider', () => {
           temperature: number;
           max_tokens: number;
           stream: boolean;
+          thinking?: { type: string };
         }
       | undefined;
 
@@ -82,8 +83,11 @@ describe('DeepSeekProvider', () => {
     expect(result.content).toBe('这是 DeepSeek 的智能回复');
     expect(capturedUrl).toBe('https://api.deepseek.com/chat/completions');
     expect(capturedHeaders?.authorization).toBe('Bearer sk-test');
-    expect(capturedBody?.model).toBe('deepseek-chat');
+    // 默认模型为 deepseek-v4-flash（V4 快速路径）
+    expect(capturedBody?.model).toBe('deepseek-v4-flash');
     expect(capturedBody?.stream).toBe(false);
+    // V4 系列显式关闭思考模式，换取更低延迟
+    expect(capturedBody?.thinking).toEqual({ type: 'disabled' });
     // 系统提示注入机器人名称与性格
     expect(capturedBody?.messages[0]).toMatchObject({ role: 'system' });
     expect(capturedBody?.messages[0]?.content).toContain('技术机器人');
@@ -108,6 +112,28 @@ describe('DeepSeekProvider', () => {
     await provider.generate({ content: 'hi' }, {});
 
     expect(capturedUrl).toBe('https://gateway.example.com/chat/completions');
+  });
+
+  it('does not send the thinking flag for non-V4 models', async () => {
+    let capturedBody:
+      | {
+          model: string;
+          thinking?: { type: string };
+        }
+      | undefined;
+    const provider = makeProvider(
+      async (_url, init) => {
+        capturedBody = JSON.parse(String(init?.body));
+        return jsonResponse(200, { choices: [{ message: { content: 'ok' } }] });
+      },
+      { model: 'deepseek-chat' },
+    );
+
+    await provider.generate({ content: 'hi' }, {});
+
+    // 非 V4 模型（如 deepseek-chat）不携带 thinking，避免上游拒绝未知参数
+    expect(capturedBody?.model).toBe('deepseek-chat');
+    expect(capturedBody?.thinking).toBeUndefined();
   });
 
   it('treats network errors as retryable', async () => {
