@@ -27,7 +27,8 @@ export default function GroupDetailPage() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
-  const [addUserId, setAddUserId] = useState('');
+  // 添加成员：按用户名（全局唯一、大小写敏感）精确匹配
+  const [addUsername, setAddUsername] = useState('');
   const [addBotId, setAddBotId] = useState('');
   // 群组设置编辑表单（仅创建者可见）
   const [editName, setEditName] = useState('');
@@ -143,13 +144,17 @@ export default function GroupDetailPage() {
   };
 
   /**
-   * 添加成员（创建者）
+   * 添加成员（创建者）：按用户名精确匹配（大小写敏感），
+   * 用户名由后端唯一索引保证全局唯一，无需前端猜测用户 id。
    */
   const addMember = async () => {
-    if (!id || !addUserId.trim()) return;
+    if (!id || !addUsername.trim()) return;
     try {
-      await api(`/groups/${id}/members`, { method: 'POST', body: { userId: addUserId.trim() } });
-      setAddUserId('');
+      await api(`/groups/${id}/members`, {
+        method: 'POST',
+        body: { username: addUsername.trim() },
+      });
+      setAddUsername('');
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '添加失败');
@@ -295,12 +300,18 @@ export default function GroupDetailPage() {
       {/* 群组信息侧栏 */}
       <aside className="group-info">
         <div className="card">
-          <h4 style={{ marginTop: 0 }}>成员（{group?.members.length ?? 0}）</h4>
+          <div className="card-title">成员（{group?.members.length ?? 0}）</div>
           {group?.members.map((member) => (
             <div className="member-row" key={member.userId}>
-              <span>
-                {member.displayName} <span className="role-badge">{member.role}</span>
-              </span>
+              <div className="member-avatar">
+                {(member.displayName || member.username).slice(0, 1).toUpperCase()}
+              </div>
+              <div className="member-info">
+                <div className="member-name">
+                  {member.displayName} <span className="role-badge">{member.role}</span>
+                </div>
+                <div className="member-username">@{member.username}</div>
+              </div>
               {isOwner && member.role !== 'OWNER' && (
                 <button className="secondary" onClick={() => void removeMember(member.userId)}>
                   移除
@@ -309,11 +320,19 @@ export default function GroupDetailPage() {
             </div>
           ))}
           {isOwner && (
-            <div className="item-row" style={{ marginTop: 10 }}>
+            <div className="add-member-row">
               <input
-                value={addUserId}
-                onChange={(e) => setAddUserId(e.target.value)}
-                placeholder="用户 id"
+                value={addUsername}
+                onChange={(e) => setAddUsername(e.target.value)}
+                placeholder="输入用户名添加（大小写敏感）"
+                maxLength={32}
+                onKeyDown={(e) => {
+                  // 回车直接提交，减少操作步骤
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void addMember();
+                  }
+                }}
               />
               <button className="secondary" onClick={() => void addMember()}>
                 添加
@@ -323,10 +342,14 @@ export default function GroupDetailPage() {
         </div>
 
         <div className="card">
-          <h4 style={{ marginTop: 0 }}>机器人（{group?.bots.length ?? 0}）</h4>
+          <div className="card-title">机器人（{group?.bots.length ?? 0}）</div>
           {group?.bots.map((bot) => (
             <div className="bot-row" key={bot.id}>
-              <span>{bot.name}</span>
+              <div className="bot-avatar">{bot.name.slice(0, 1)}</div>
+              <div className="member-info">
+                <div className="member-name">{bot.name}</div>
+                <div className="member-username">{bot.personality}</div>
+              </div>
               {isOwner && (
                 <button className="secondary" onClick={() => void removeBot(bot.id)}>
                   移除
@@ -358,7 +381,7 @@ export default function GroupDetailPage() {
 
         {isOwner && (
           <div className="card">
-            <h4 style={{ marginTop: 0 }}>群组设置</h4>
+            <div className="card-title">群组设置</div>
             <div className="field">
               <label htmlFor="groupNameEdit">名称（1-50）</label>
               <input

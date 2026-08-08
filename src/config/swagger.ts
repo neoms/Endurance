@@ -310,9 +310,10 @@ const options: swaggerJsdoc.Options = {
         // 群组成员（对外输出）
         GroupMember: {
           type: 'object',
-          required: ['userId', 'displayName', 'role', 'joinedAt'],
+          required: ['userId', 'username', 'displayName', 'role', 'joinedAt'],
           properties: {
             userId: { type: 'string', description: '成员用户 id' },
+            username: { type: 'string', description: '成员用户名（全局唯一、大小写敏感）' },
             displayName: { type: 'string', description: '成员昵称' },
             role: {
               type: 'string',
@@ -415,9 +416,15 @@ const options: swaggerJsdoc.Options = {
         // 添加成员请求体
         AddMemberRequest: {
           type: 'object',
-          required: ['userId'],
+          required: ['username'],
           properties: {
-            userId: { type: 'string', description: '待添加的用户 id' },
+            username: {
+              type: 'string',
+              minLength: 3,
+              maxLength: 32,
+              description: '待添加用户的用户名（全局唯一、大小写敏感，按精确字符串匹配）',
+              example: 'bob',
+            },
           },
         },
         // 添加机器人请求体

@@ -42,9 +42,16 @@ export const updateGroupSchema = z
     },
   );
 
-// 添加成员请求体
+// 添加成员请求体：按用户名添加（用户名全局唯一、大小写敏感）。
+// 校验规则与注册接口保持一致（3-32 位字母/数字/下划线），
+// 非法用户名在入口返回 422，而不是到服务层查库后返回 404。
 export const addMemberSchema = z.object({
-  userId: z.string().min(1),
+  username: z
+    .string()
+    .trim()
+    .min(3, 'Username must be at least 3 characters')
+    .max(32, 'Username must be at most 32 characters')
+    .regex(/^[a-zA-Z0-9_]+$/, 'Username may only contain letters, numbers and underscores'),
 });
 
 // 添加机器人请求体

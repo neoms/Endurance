@@ -2,7 +2,8 @@
  * 认证服务：注册 / 登录 / 获取当前用户
  *
  * 【安全要点】
- * - 用户名统一小写去空格存储，避免大小写变体重复注册；
+ * - 用户名全局唯一且大小写敏感：只做 trim 去首尾空格，不归一化大小写，
+ *   因此「Alice」与「alice」是两个不同用户（数据库唯一约束按大小写敏感比较）；
  * - 密码使用 bcrypt 哈希后入库，绝不落明文；
  * - 登录失败统一返回 401 INVALID_CREDENTIALS，不区分「用户不存在」与「密码错误」，
  *   防止用户枚举；
@@ -50,10 +51,13 @@ function issueToken(user: User): string {
  * @param input { username, password, displayName? }
  * @returns Promise<AuthResult> { token, user }，注册成功后直接签发 token 免二次登录
  * @throws AppError(409 USERNAME_TAKEN) 用户名已存在
- * 主要逻辑：规范化用户名 → 查重 → bcrypt 哈希 → 创建用户 → 签发 token。
+ * 主要逻辑：trim 用户名 → 查重（大小写敏感）→ bcrypt 哈希 → 创建用户 → 签发 token。
  */
 export async function register(input: RegisterInput): Promise<AuthResult> {
-  const username = input.username.trim().toLowerCase();
+  // 用户名全局唯一、大小写敏感：仅去除首尾空格，保留用户输入的大小写原样存储。
+  // 数据库 unique 约束按精确字符串比较（SQLite 默认大小写敏感），
+  // 因此 'Alice' 与 'alice' 可共存，登录时也必须输入完全一致的用户名。
+  const username = input.username.trim();
   const existing = await prisma.user.findUnique({ where: { username } });
   if (existing) {
     logger.warn({ username }, 'auth: register failed, username taken');
@@ -90,10 +94,12 @@ export async function register(input: RegisterInput): Promise<AuthResult> {
  * @param input { username, password }
  * @returns Promise<AuthResult> { token, user }
  * @throws AppError(401 INVALID_CREDENTIALS) 用户名或密码错误（统一提示，防枚举）
- * 主要逻辑：按规范化用户名查用户 → bcrypt 校验密码 → 签发 token。
+ * 主要逻辑：按精确用户名（大小写敏感）查用户 → bcrypt 校验密码 → 签发 token。
  */
 export async function login(input: LoginInput): Promise<AuthResult> {
-  const username = input.username.trim().toLowerCase();
+  // 与注册一致：按用户输入的原样用户名精确查询（大小写敏感），
+  // 避免把「大小写不同」误判为同一账号，也避免引入新的枚举面。
+  const username = input.username.trim();
   const user = await prisma.user.findUnique({ where: { username } });
   const passwordValid = user ? await verifyPassword(input.password, user.passwordHash) : false;
   if (!user || !passwordValid) {

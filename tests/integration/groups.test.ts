@@ -112,7 +112,7 @@ describe('groups API', () => {
     const addRes = await request(app)
       .post(`/api/groups/${groupId}/members`)
       .set(auth(owner.token))
-      .send({ userId: member.user.id });
+      .send({ username: member.user.username });
     expect(addRes.status).toBe(200);
 
     const memberPatch = await request(app)
@@ -141,20 +141,31 @@ describe('groups API', () => {
     const added = await request(app)
       .post(`/api/groups/${groupId}/members`)
       .set(auth(owner.token))
-      .send({ userId: member.user.id });
+      .send({ username: member.user.username });
     expect(added.status).toBe(200);
+    // 成员输出应包含用户名（前端按用户名展示与排查）
+    expect(added.body.group.members.map((m: { username: string }) => m.username)).toContain(
+      member.user.username,
+    );
 
     const duplicate = await request(app)
       .post(`/api/groups/${groupId}/members`)
       .set(auth(owner.token))
-      .send({ userId: member.user.id });
+      .send({ username: member.user.username });
     expect(duplicate.status).toBe(409);
 
     const unknown = await request(app)
       .post(`/api/groups/${groupId}/members`)
       .set(auth(owner.token))
-      .send({ userId: 'not-a-real-user' });
+      .send({ username: 'not_a_real_user' });
     expect(unknown.status).toBe(404);
+
+    // 用户名大小写敏感：用错误大小写添加已存在的用户 → 404（精确匹配失败）
+    const wrongCase = await request(app)
+      .post(`/api/groups/${groupId}/members`)
+      .set(auth(owner.token))
+      .send({ username: member.user.username.toUpperCase() });
+    expect(wrongCase.status).toBe(404);
 
     const removeCreator = await request(app)
       .delete(`/api/groups/${groupId}/members/${owner.user.id}`)
@@ -176,7 +187,7 @@ describe('groups API', () => {
     await request(app)
       .post(`/api/groups/${groupId}/members`)
       .set(auth(owner.token))
-      .send({ userId: member.user.id });
+      .send({ username: member.user.username });
 
     const ownerLeave = await request(app)
       .delete(`/api/groups/${groupId}/members/me`)

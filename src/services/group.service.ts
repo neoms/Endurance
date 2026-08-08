@@ -151,7 +151,7 @@ async function assertGroupOwner(userId: string, groupId: string): Promise<GroupM
  */
 function toGroupOutput(
   group: ChatGroup & {
-    members: (GroupMember & { user: { displayName: string } })[];
+    members: (GroupMember & { user: { username: string; displayName: string } })[];
     bots: (GroupBot & { bot: Bot })[];
   },
 ): GroupOutput {
@@ -165,6 +165,7 @@ function toGroupOutput(
     updatedAt: group.updatedAt,
     members: group.members.map((m) => ({
       userId: m.userId,
+      username: m.user.username,
       displayName: m.user.displayName,
       role: m.role,
       joinedAt: m.joinedAt,
@@ -251,7 +252,7 @@ export async function listGroups(userId: string): Promise<GroupOutput[]> {
     include: {
       group: {
         include: {
-          members: { include: { user: { select: { displayName: true } } } },
+          members: { include: { user: { select: { username: true, displayName: true } } } },
           bots: { include: { bot: true } },
         },
       },
@@ -274,7 +275,7 @@ export async function getGroup(userId: string, groupId: string): Promise<GroupOu
   const group = await prisma.chatGroup.findUnique({
     where: { id: groupId },
     include: {
-      members: { include: { user: { select: { displayName: true } } } },
+      members: { include: { user: { select: { username: true, displayName: true } } } },
       bots: { include: { bot: true } },
     },
   });
@@ -318,23 +319,26 @@ export async function updateGroup(
  *
  * @param userId      当前用户 id（OWNER）
  * @param groupId     目标群组 id
- * @param targetUserId 待添加的用户 id
+ * @param targetUsername 待添加用户的用户名（全局唯一、大小写敏感，按精确字符串匹配）
  * @returns Promise<GroupOutput> 更新后的群组
  * @throws AppError(403) 非创建者；404 目标用户不存在；409 已是成员
  */
 export async function addGroupMember(
   userId: string,
   groupId: string,
-  targetUserId: string,
+  targetUsername: string,
 ): Promise<GroupOutput> {
   await assertGroupOwner(userId, groupId);
+  // 用户名全局唯一且大小写敏感：findUnique 按精确字符串查找（不做小写归一化），
+  // 因此大小写不匹配时返回 404，不会误把 'Alice' 当成 'alice' 添加进群组。
   const target = await prisma.user.findUnique({
-    where: { id: targetUserId },
+    where: { username: targetUsername },
     select: { id: true },
   });
   if (!target) {
     throw new AppError(404, 'USER_NOT_FOUND', 'Target user not found');
   }
+  const targetUserId = target.id;
   const existing = await prisma.groupMember.findUnique({
     where: { groupId_userId: { groupId, userId: targetUserId } },
   });
@@ -344,7 +348,7 @@ export async function addGroupMember(
   await prisma.groupMember.create({
     data: { groupId, userId: targetUserId, role: MemberRole.MEMBER },
   });
-  logger.info({ userId, groupId, targetUserId }, 'group: member added');
+  logger.info({ userId, groupId, targetUsername, targetUserId }, 'group: member added');
   return getGroup(userId, groupId);
 }
 

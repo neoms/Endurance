@@ -23,6 +23,7 @@ export interface GroupBotOutput {
 // 群组成员（对外输出）
 export interface GroupMemberOutput {
   userId: string;
+  username: string;
   displayName: string;
   role: 'OWNER' | 'MEMBER';
   joinedAt: Date;

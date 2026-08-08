@@ -575,12 +575,12 @@ export default function AppLayout() {
                 </div>
                 <div className="field">
                   <label>选择机器人（至少 1 个）</label>
-                  <div className="bot-toggle-row">
+                  <div className="bot-grid">
                     {modal.bots.map((bot) => (
                       <button
                         key={bot.id}
                         type="button"
-                        className={modal.botIds.includes(bot.id) ? '' : 'secondary'}
+                        className={`bot-card ${modal.botIds.includes(bot.id) ? 'selected' : ''}`}
                         onClick={() =>
                           setModal((prev) =>
                             prev && prev.kind === 'new-group'
@@ -594,7 +594,8 @@ export default function AppLayout() {
                           )
                         }
                       >
-                        {bot.name}
+                        <span className="bot-card-name">{bot.name}</span>
+                        <span className="bot-card-personality">{bot.personality}</span>
                       </button>
                     ))}
                   </div>

@@ -50,6 +50,34 @@ describe('auth API', () => {
     expect(res.body.error.code).toBe('USERNAME_TAKEN');
   });
 
+  it('treats usernames as case-sensitive and globally unique', async () => {
+    // 注册小写用户名（登录名按用户输入原样存储，不做小写归一化）
+    const reg = await request(app)
+      .post('/api/auth/register')
+      .send({ username: 'caseuser', password: 'password123' });
+    expect(reg.status).toBe(201);
+    expect(reg.body.user.username).toBe('caseuser');
+
+    // 登录必须精确匹配大小写：大小写变体 'CaseUser' 不是 'caseuser' → 401
+    const wrongCase = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'CaseUser', password: 'password123' });
+    expect(wrongCase.status).toBe(401);
+
+    // 精确大小写匹配 → 登录成功
+    const exactCase = await request(app)
+      .post('/api/auth/login')
+      .send({ username: 'caseuser', password: 'password123' });
+    expect(exactCase.status).toBe(200);
+    expect(exactCase.body.user.username).toBe('caseuser');
+
+    // 全局唯一 + 大小写敏感：'CaseUser' 与 'caseuser' 是两个不同账号，可并存注册
+    const second = await request(app)
+      .post('/api/auth/register')
+      .send({ username: 'CaseUser', password: 'password123' });
+    expect(second.status).toBe(201);
+  });
+
   it('rejects invalid input with 422', async () => {
     // 用户名过短 + 密码过短，应命中校验规则
     const res = await request(app)

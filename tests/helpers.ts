@@ -13,13 +13,16 @@ import request from 'supertest';
  *
  * @param app      Express 应用实例
  * @param username 注册用户名（测试内需唯一，beforeEach 会清空用户表）
- * @returns { token: string, user: { id: string } }
+ * @returns { token: string, user: { id: string, username: string } }
  */
 export async function registerUser(app: Express, username: string) {
   const res = await request(app)
     .post('/api/auth/register')
     .send({ username, password: 'password123', displayName: username });
-  return { token: res.body.token as string, user: res.body.user as { id: string } };
+  return {
+    token: res.body.token as string,
+    user: res.body.user as { id: string; username: string },
+  };
 }
 
 /**

@@ -64,6 +64,7 @@ export interface Bot {
 // 群组成员
 export interface GroupMember {
   userId: string;
+  username: string;
   displayName: string;
   role: 'OWNER' | 'MEMBER';
   joinedAt: string;

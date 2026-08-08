@@ -321,14 +321,16 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
   /**
    * POST /api/groups/{id}/members 添加成员
    *
-   * 入参：{ userId }；返回值：200 { group }；仅创建者（成员 403）。
+   * 入参：{ username }（用户名全局唯一、大小写敏感，按精确字符串匹配）；
+   * 返回值：200 { group }；仅创建者（成员 403）。
    *
    * @openapi
    * /api/groups/{id}/members:
    *   post:
    *     tags: [Groups]
    *     summary: 添加群组成员
-   *     description: 将指定用户加入群组（MEMBER 角色）；仅创建者可操作。
+   *     description: 按用户名（全局唯一、大小写敏感）将用户加入群组（MEMBER 角色）；
+   *       仅创建者可操作；目标用户不存在返回 404，已是成员返回 409。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -388,7 +390,7 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    */
   router.post('/:id/members', validate(addMemberSchema), async (req, res) => {
     const user = requireUser(req);
-    const group = await addGroupMember(user.id, paramId(req), req.body.userId);
+    const group = await addGroupMember(user.id, paramId(req), req.body.username);
     res.json({ group });
   });
 
