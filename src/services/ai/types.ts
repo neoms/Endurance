@@ -21,12 +21,15 @@ export interface AiProvider {
  * @property content     当前用户消息内容
  * @property botName     机器人名称（群组场景用于回复前缀，可选）
  * @property personality 机器人性格描述（可选，供真实 AI 参考人设）
+ * @property userName    人类发送者的用户名（可选；供 Mock 回显「用户名说：」时使用，
+ *                       不再写死「你说」）
  * @property history     最近对话历史（role: user/assistant），供上下文理解
  */
 export interface AiGenerateContext {
   content: string;
   botName?: string;
   personality?: string;
+  userName?: string;
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
 }
 

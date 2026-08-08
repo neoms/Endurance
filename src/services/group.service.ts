@@ -11,6 +11,15 @@
  *   * ALL_BOTS：本轮全部机器人回复；
  *   * RANDOM_ONE：随机一个机器人回复；
  *   * CONTENT_ROUTED：按 replyTendency 关键词匹配；无命中时随机兜底一个。
+ * - @提及（显式点名）：
+ *   * 消息中 @机器人名 → 仅被 @ 的机器人按出现顺序回复（覆盖响应策略与每轮上限，
+ *     用户显式点名优先于策略，因此不受防循环上限约束）；
+ *   * @真实群组成员（用户名/昵称）→ 合法提及，由真人本人回复，后端不处理；
+ *   * 只要消息中存在 @提及（无论 @ 的是机器人还是真人）→ 只有被 @ 的对象回复，
+ *     未提及的机器人一律不回复（只 @ 真人时本轮无机器人回复）；
+ *   * 被 @ 的名称必须存在于当前群组（机器人名或成员用户名/昵称），
+ *     否则返回 400 MENTION_NOT_FOUND（防无效引用）；
+ *   * 消息中没有任何 @ 时，才走原响应策略。
  * - 防循环（三层）：
  *   1. 触发源限制：只有人类消息开启新轮次（roundId），机器人消息永不触发新轮次；
  *   2. 轮次硬上限：每轮回复数 ≤ maxConsecutiveBotReplies；
@@ -56,6 +65,21 @@ const GROUP_HISTORY_SIZE = 10;
 // 群组级 in-flight 锁：同一群组同时只允许一个生成轮次（复用共享键级锁工具）
 const groupLocks = createKeyedLock();
 
+// 群组消息查询时统一携带的发送者关联：真人（用户名/昵称）+ 机器人（名称）。
+// 设计原因：历史消息的发言者名称必须「随消息可追溯」——
+// 成员离开群组或机器人被移除后，若前端只查当前成员/机器人列表就会丢失名字，
+// 因此这里直接连表带出发送者信息，保证历史始终可读。
+const GROUP_MESSAGE_SENDER_INCLUDE = {
+  user: { select: { username: true, displayName: true } },
+  bot: { select: { name: true } },
+};
+
+// 带发送者信息的群组消息（Prisma include 结果类型）
+type GroupMessageWithSender = GroupMessage & {
+  user: { username: string; displayName: string } | null;
+  bot: { name: string } | null;
+};
+
 /**
  * 判断消息内容是否命中机器人的关键词倾向
  *
@@ -70,6 +94,93 @@ function keywordMatches(replyTendency: string, content: string): boolean {
     .map((k) => k.trim().toLowerCase())
     .filter(Boolean)
     .some((keyword) => normalized.includes(keyword));
+}
+
+// @提及提取正则：@ 后跟非空白、非常用中文/英文标点的连续字符。
+// - 中文标点列入排除集，避免「@技术机器人，你好」把逗号吸进名称里；
+// - 用「前面不能是字母/数字/下划线」的后行断言排除邮箱（a@b.com）被误判，
+//   同时允许「请@技术机器人」这种紧贴中文的场景（中文不是字母数字）。
+const MENTION_PATTERN = /(?<![a-zA-Z0-9_])@([^\s@，。！？!?；;：:]+)/g;
+
+/**
+ * 提取消息内容中的 @提及名称（纯函数，便于单元测试）
+ *
+ * @param content 消息内容（如「@技术机器人 帮我看下 bug」）
+ * @returns string[] 按出现顺序提取的名称（保留重复出现；如 ['技术机器人', 'alice']）
+ * 说明：只负责「切词」，名称合法性（是否存在于群组）由 resolveMentions 判定。
+ */
+export function parseMentionNames(content: string): string[] {
+  const names: string[] = [];
+  for (const match of content.matchAll(MENTION_PATTERN)) {
+    const name = match[1]?.trim();
+    if (name) {
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+/**
+ * 解析 @提及：判断名称是否为群组内机器人/成员，并返回被 @ 的机器人
+ *
+ * @param content 消息内容
+ * @param bots    群组内全部机器人（含未启用；用于「存在性」校验）
+ * @param members 群组成员（含用户名与昵称，用于校验 @真实用户）
+ * @returns { mentionedBots, mentionedMembers, unresolved }
+ *   - mentionedBots：命中的机器人，按 @ 首次出现顺序去重（同一机器人 @ 多次只回一次）；
+ *   - mentionedMembers：被 @ 的真实成员名（用户名或昵称，按出现顺序；仅用于判断
+ *     「消息中是否存在 @ 提及」，真实用户回复由用户本人完成，后端不处理）；
+ *   - unresolved：既不是群组机器人也不是群组成员的非法名称（去重后的列表）。
+ * 说明：机器人按「名称」精确匹配；真实用户按「用户名」或「昵称」精确匹配，
+ * 大小写敏感（与账号系统一致），因此 `@Alice` 与 `@alice` 指向不同对象。
+ */
+export function resolveMentions(
+  content: string,
+  bots: Bot[],
+  members: Array<{ username: string; displayName: string }>,
+): { mentionedBots: Bot[]; mentionedMembers: string[]; unresolved: string[] } {
+  const tokens = parseMentionNames(content);
+  if (tokens.length === 0) {
+    return { mentionedBots: [], mentionedMembers: [], unresolved: [] };
+  }
+
+  // 建立机器人名 → 机器人、成员名 → 合法标记 的查找表
+  const botByName = new Map(bots.map((bot) => [bot.name, bot]));
+  const memberNames = new Set<string>();
+  for (const member of members) {
+    memberNames.add(member.username);
+    memberNames.add(member.displayName);
+  }
+
+  const mentionedBots: Bot[] = [];
+  const mentionedMembers: string[] = [];
+  const unresolved: string[] = [];
+  const seenBotIds = new Set<string>();
+  const seenUnresolved = new Set<string>();
+
+  for (const token of tokens) {
+    // 1. 命中群组机器人：按首次出现顺序加入，重复 @ 同一机器人只保留一次
+    const bot = botByName.get(token);
+    if (bot) {
+      if (!seenBotIds.has(bot.id)) {
+        seenBotIds.add(bot.id);
+        mentionedBots.push(bot);
+      }
+      continue;
+    }
+    // 2. 命中真实群组成员：合法提及，无需机器人回复逻辑
+    if (memberNames.has(token)) {
+      mentionedMembers.push(token);
+      continue;
+    }
+    // 3. 既不是机器人也不是成员：非法提及，收集（去重）后由调用方 400 拒绝
+    if (!seenUnresolved.has(token)) {
+      seenUnresolved.add(token);
+      unresolved.push(token);
+    }
+  }
+
+  return { mentionedBots, mentionedMembers, unresolved };
 }
 
 /**
@@ -182,10 +293,10 @@ function toGroupOutput(
 /**
  * 序列化：群组消息模型 → 对外输出
  *
- * @param message 群组消息记录
+ * @param message 含发送者关联的群组消息记录
  * @returns GroupMessageOutput
  */
-function toGroupMessageOutput(message: GroupMessage): GroupMessageOutput {
+function toGroupMessageOutput(message: GroupMessageWithSender): GroupMessageOutput {
   return {
     id: message.id,
     groupId: message.groupId,
@@ -193,6 +304,12 @@ function toGroupMessageOutput(message: GroupMessage): GroupMessageOutput {
     senderType: message.senderType,
     userId: message.userId,
     botId: message.botId,
+    // 发送者展示名：真人取昵称、机器人取名称；
+    // 找不到（如用户被删除后 userId 置空）时返回 null，由前端兜底展示
+    senderName:
+      message.senderType === SenderType.HUMAN
+        ? (message.user?.displayName ?? null)
+        : (message.bot?.name ?? null),
     content: message.content,
     status: message.status,
     createdAt: message.createdAt,
@@ -495,15 +612,20 @@ async function buildGroupHistory(
  * @returns Promise<SendGroupMessageResult> 人类消息 + 本轮机器人回复列表
  * @throws AppError(404) 群组不存在或当前用户不是成员
  * @throws AppError(409 NO_ACTIVE_BOT) 群组内没有启用状态的机器人
+ * @throws AppError(400 MENTION_NOT_FOUND) 消息中的 @名称不在当前群组内
  *
  * 主要逻辑（在群组锁内执行）：
  * 1. 幂等检查：clientRequestId 已存在时直接返回首次轮次结果（锁内保证并发安全）；
  * 2. 生成 roundId，人类消息落库；
  * 3. 无启用机器人时拒绝发送（保证回复契约，不静默返回空轮次）；
- * 4. 按响应策略选择机器人（CONTENT_ROUTED 无命中时随机兜底）；
- * 5. 每轮回复数受 maxConsecutiveBotReplies 限制（防循环硬上限）；
- * 6. 逐个机器人生成回复；生成失败以兜底文案占位（保证必有回复）；
- * 7. 机器人消息共享同一 roundId，且永不触发新轮次（触发源限制）。
+ * 4. 校验 @提及：名称必须存在于当前群组，否则 400；
+ * 5. 只要消息中存在 @提及（无论 @ 的是机器人还是真人）→ 仅被 @ 的对象回复：
+ *    - 被 @ 的启用机器人按 @ 顺序回复（覆盖策略与上限）；
+ *    - 只 @ 了真人 → 本轮不触发任何机器人（由真人本人回复，避免无关机器人抢话）；
+ *    没有任何 @ → 按响应策略选择机器人（CONTENT_ROUTED 无命中时随机兜底）；
+ * 6. 每轮回复数受 maxConsecutiveBotReplies 限制（防循环硬上限，仅作用于策略选择）；
+ * 7. 逐个机器人生成回复；生成失败以兜底文案占位（保证必有回复）；
+ * 8. 机器人消息共享同一 roundId，且永不触发新轮次（触发源限制）。
  */
 export async function sendGroupMessage(
   aiService: AiService,
@@ -518,7 +640,10 @@ export async function sendGroupMessage(
     // 锁内读取群组配置与机器人（保证与轮次执行一致）
     const group = await prisma.chatGroup.findUnique({
       where: { id: groupId },
-      include: { bots: { include: { bot: true } } },
+      include: {
+        bots: { include: { bot: true } },
+        members: { include: { user: { select: { username: true, displayName: true } } } },
+      },
     });
     if (!group) {
       throw new AppError(404, 'GROUP_NOT_FOUND', 'Group not found');
@@ -533,6 +658,28 @@ export async function sendGroupMessage(
       throw new AppError(409, 'NO_ACTIVE_BOT', 'Group has no active bots, cannot reply');
     }
 
+    // @提及解析与校验：被 @ 的名称必须存在于当前群组（机器人名 / 成员用户名 / 成员昵称）。
+    // 解析使用群组「全部」机器人做存在性判断（含停用的），保证「必须存在」语义完整；
+    // 实际回复只从「启用」机器人中选取。
+    const mentionResult = resolveMentions(
+      content,
+      group.bots.map((gb) => gb.bot),
+      group.members.map((m) => m.user),
+    );
+    if (mentionResult.unresolved.length > 0) {
+      // 明确拒绝非法 @，并把未解析名称放进 details，方便前端逐条提示
+      logger.warn(
+        { groupId, userId, unresolved: mentionResult.unresolved },
+        'group: send blocked, unresolved mentions',
+      );
+      throw new AppError(
+        400,
+        'MENTION_NOT_FOUND',
+        `Cannot mention: ${mentionResult.unresolved.join(', ')}`,
+        { mentions: mentionResult.unresolved },
+      );
+    }
+
     // 幂等：同一群组内相同 clientRequestId 直接返回首次轮次结果（锁内保证并发安全）。
     // 命中时按 roundId 取回该轮全部机器人回复，与首次响应一致。
     if (input.clientRequestId) {
@@ -543,11 +690,13 @@ export async function sendGroupMessage(
             clientRequestId: input.clientRequestId,
           },
         },
+        include: GROUP_MESSAGE_SENDER_INCLUDE,
       });
       if (existing) {
         const existingBots = await prisma.groupMessage.findMany({
           where: { groupId, roundId: existing.roundId, senderType: SenderType.BOT },
           orderBy: { createdAt: 'asc' },
+          include: GROUP_MESSAGE_SENDER_INCLUDE,
         });
         logger.debug({ groupId, clientRequestId: input.clientRequestId }, 'group: idempotent hit');
         return {
@@ -570,25 +719,40 @@ export async function sendGroupMessage(
         clientRequestId: input.clientRequestId,
       },
     });
+    // 重新带发送者信息读取，保证响应里包含 senderName（与历史查询口径一致）
+    const userMessageWithSender = await prisma.groupMessage.findUnique({
+      where: { id: userMessage.id },
+      include: GROUP_MESSAGE_SENDER_INCLUDE,
+    });
 
-    // 按策略选择本轮机器人（防循环上限 + 无命中兜底）
-    const selectedBots = selectBotsForRound(
-      bots,
-      group.responseMode,
-      content,
-      group.maxConsecutiveBotReplies,
-    );
+    // 选择本轮回复机器人：
+    // - 消息中存在任何 @ 提及（含只 @ 真人）→ 仅被 @ 的启用机器人回复：
+    //   * @ 了机器人 → 按 @ 顺序回复（用户显式点名优先，覆盖响应策略与每轮上限；
+    //     这是人为指定，不属于「机器人自发循环」）；
+    //   * 只 @ 了真人 → 本轮不回复（消息明确指向真人，机器人不应抢话），
+    //     由真人自行回复或不回复；
+    // - 没有任何 @ → 走原响应策略（含防循环上限与无命中兜底）。
+    const mentionedActiveBots = mentionResult.mentionedBots.filter((bot) => bot.isActive);
+    const hasMentions =
+      mentionResult.mentionedBots.length > 0 || mentionResult.mentionedMembers.length > 0;
+    const selectedBots = hasMentions
+      ? mentionedActiveBots
+      : selectBotsForRound(bots, group.responseMode, content, group.maxConsecutiveBotReplies);
     const history = await buildGroupHistory(groupId);
 
     const botMessages: GroupMessageOutput[] = [];
     for (const bot of selectedBots) {
       let replyText: string;
       try {
+        // 传入实际发言成员的用户名：Mock AI 回显「用户名说：」而非写死「你说」。
+        // 群组成员已在锁内随群组一起加载（ACL 保证发送者必然是成员）
+        const senderName = group.members.find((m) => m.userId === userId)?.user.username ?? '用户';
         const reply = await aiService.generateWithRetry({
           content,
           botName: bot.name,
           personality: bot.personality,
           history,
+          userName: senderName,
         });
         replyText = reply;
       } catch (err) {
@@ -609,7 +773,11 @@ export async function sendGroupMessage(
           status: MessageStatus.SENT,
         },
       });
-      botMessages.push(toGroupMessageOutput(saved));
+      const savedWithSender = await prisma.groupMessage.findUnique({
+        where: { id: saved.id },
+        include: GROUP_MESSAGE_SENDER_INCLUDE,
+      });
+      botMessages.push(toGroupMessageOutput(savedWithSender!));
     }
 
     logger.info(
@@ -617,7 +785,7 @@ export async function sendGroupMessage(
       'group: round completed',
     );
     return {
-      userMessage: toGroupMessageOutput(userMessage),
+      userMessage: toGroupMessageOutput(userMessageWithSender!),
       botMessages,
     };
   });
@@ -658,7 +826,7 @@ export async function listGroupMessages(
     }
   }
 
-  let messages: GroupMessage[];
+  let messages: GroupMessageWithSender[];
   if (query.before && anchor) {
     // 反向分页：锚点之前（(createdAt, id) 复合键严格小于）取 limit 条，反转回升序
     messages = await prisma.groupMessage.findMany({
@@ -671,6 +839,7 @@ export async function listGroupMessages(
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: query.limit,
+      include: GROUP_MESSAGE_SENDER_INCLUDE,
     });
     messages.reverse();
   } else if (query.cursor) {
@@ -681,6 +850,7 @@ export async function listGroupMessages(
       take: query.limit,
       cursor: { id: query.cursor },
       skip: 1,
+      include: GROUP_MESSAGE_SENDER_INCLUDE,
     });
   } else {
     // 默认：最近 limit 条（升序）
@@ -688,6 +858,7 @@ export async function listGroupMessages(
       where: { groupId },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: query.limit,
+      include: GROUP_MESSAGE_SENDER_INCLUDE,
     });
     messages.reverse();
   }

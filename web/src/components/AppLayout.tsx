@@ -51,6 +51,8 @@ export default function AppLayout() {
   const [error, setError] = useState('');
   // 三点菜单：当前展开菜单的对话 id（null 表示全部收起）
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  // 左下角用户区气泡：点击头像/名字区域弹出（显示我的用户名）
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   // 悬浮框：新建群组/加标签/重命名（null 表示关闭；新建对话直接创建不弹框）
   const [modal, setModal] = useState<SidebarModal | null>(null);
   // 悬浮框内的错误提示（如「请至少选择一个机器人」显示在框内而非侧边栏底部）
@@ -301,6 +303,8 @@ export default function AppLayout() {
       <aside className={`sidebar ${sidebarOpen ? '' : 'collapsed'}`}>
         {/* 三点菜单的透明遮罩：点击菜单外任意位置收起菜单 */}
         {menuOpenId && <div className="menu-backdrop" onClick={() => setMenuOpenId(null)} />}
+        {/* 用户区气泡遮罩：点击其他位置收起 */}
+        {userMenuOpen && <div className="menu-backdrop" onClick={() => setUserMenuOpen(false)} />}
         <div className="sidebar-header">
           {/* 顶部：对话/群组 Tab 切换 */}
           <div className="sidebar-tabs">
@@ -449,10 +453,25 @@ export default function AppLayout() {
         {error && <div className="sidebar-error">{error}</div>}
 
         <div className="sidebar-footer">
-          <div className="avatar">{(user?.displayName ?? 'U').slice(0, 1).toUpperCase()}</div>
-          <div className="sidebar-user">
-            <div className="sidebar-user-name">{user?.displayName}</div>
-          </div>
+          {/* 头像 + 名字区域：整体可点击，点击弹出「我的用户名」气泡 */}
+          <button
+            type="button"
+            className="sidebar-user-btn"
+            title="查看我的用户名"
+            onClick={() => setUserMenuOpen((v) => !v)}
+          >
+            <div className="avatar">{(user?.displayName ?? 'U').slice(0, 1).toUpperCase()}</div>
+            <div className="sidebar-user">
+              <div className="sidebar-user-name">{user?.displayName}</div>
+            </div>
+          </button>
+          {/* 用户名气泡：悬浮于底部用户区上方 */}
+          {userMenuOpen && (
+            <div className="user-popover" onClick={(e) => e.stopPropagation()}>
+              <div className="user-popover-label">我的用户名</div>
+              <div className="user-popover-name">@{user?.username}</div>
+            </div>
+          )}
           <button className="secondary" onClick={logout}>
             登出
           </button>

@@ -50,6 +50,9 @@ export interface GroupMessageOutput {
   senderType: 'HUMAN' | 'BOT';
   userId: string | null;
   botId: string | null;
+  /** 发送者展示名：真人=昵称，机器人=名称；随消息一起返回，
+   *  成员离开群组/机器人被移除后历史消息仍能显示原发言者 */
+  senderName: string | null;
   content: string;
   status: 'PENDING' | 'SENT' | 'FAILED';
   createdAt: Date;

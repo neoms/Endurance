@@ -109,6 +109,7 @@ async function buildHistory(
  * @param aiService      AI 服务（含重试/超时）
  * @param userId         当前用户 id
  * @param conversationId 目标对话 id
+ * @param userName       当前用户用户名（供 AI 回显「用户名说：」）
  * @param input          { content, clientRequestId? }
  * @returns Promise<SendMessageResult> 用户消息 + AI 回复（失败时为 FAILED 状态）
  * @throws AppError(404) 对话不存在或不属于当前用户
@@ -120,6 +121,7 @@ export async function sendMessage(
   aiService: AiService,
   userId: string,
   conversationId: string,
+  userName: string,
   input: SendMessageInput,
 ): Promise<SendMessageResult> {
   // ACL：仅对话所有者可发送消息（锁外快速失败，避免非所有者阻塞在锁队列）
@@ -188,7 +190,7 @@ export async function sendMessage(
     // 第三步：调用 AI（含重试与超时），并按结果落库
     let aiMessage: Message;
     try {
-      const reply = await aiService.generateWithRetry({ content, history });
+      const reply = await aiService.generateWithRetry({ content, history, userName });
       aiMessage = await prisma.message.create({
         data: {
           conversationId,
@@ -299,6 +301,7 @@ export async function listMessages(
  *
  * @param aiService AI 服务
  * @param userId    当前用户 id
+ * @param userName  当前用户用户名（供 AI 回显「用户名说：」）
  * @param messageId 目标消息 id
  * @returns Promise<MessageOutput> 重试后的 AI 消息（成功 SENT / 仍失败则保持 FAILED 并更新错误信息）
  * @throws AppError(404) 消息不存在或不属于当前用户
@@ -308,6 +311,7 @@ export async function listMessages(
 export async function retryAiMessage(
   aiService: AiService,
   userId: string,
+  userName: string,
   messageId: string,
 ): Promise<MessageOutput> {
   const message = await prisma.message.findUnique({
@@ -355,6 +359,7 @@ export async function retryAiMessage(
     const reply = await aiService.generateWithRetry({
       content: promptMessage?.content ?? '请重新生成回复',
       history: contextHistory,
+      userName,
     });
     const updated = await prisma.message.update({
       where: { id: messageId },

@@ -329,6 +329,8 @@ describe('groups API', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.userMessage.senderType).toBe('HUMAN');
+    // 人类消息返回发送者展示名（registerUser 的 displayName 取用户名）
+    expect(res.body.userMessage.senderName).toBe('groupowner');
     expect(res.body.botMessages).toHaveLength(2);
     expect(res.body.botMessages.every((m: { senderType: string }) => m.senderType === 'BOT')).toBe(
       true,
@@ -388,6 +390,138 @@ describe('groups API', () => {
       .set(auth(token))
       .send({ content: '今天天气真好' });
     expect(miss.body.botMessages).toHaveLength(1);
+  });
+
+  it('mentioning a bot replies only that bot, even in ALL_BOTS mode', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const bots = await prisma.bot.findMany({ select: { id: true, code: true, name: true } });
+    const tech = bots.find((b) => b.code === 'tech');
+    const humor = bots.find((b) => b.code === 'humor');
+    expect(tech).toBeDefined();
+    expect(humor).toBeDefined();
+
+    // ALL_BOTS 模式下群组有 2 个机器人，但只 @ 技术机器人 → 只有它回复
+    const created = await createGroup(token, {
+      name: 'g',
+      botIds: [tech!.id, humor!.id],
+      responseMode: 'ALL_BOTS',
+    });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: `@${tech!.name} 帮我看看这个报错` });
+
+    expect(res.status).toBe(201);
+    expect(res.body.botMessages).toHaveLength(1);
+    expect(res.body.botMessages[0].botId).toBe(tech!.id);
+  });
+
+  it('replies to multiple mentioned bots in @ order (deduped)', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const bots = await prisma.bot.findMany({ select: { id: true, code: true, name: true } });
+    const tech = bots.find((b) => b.code === 'tech');
+    const humor = bots.find((b) => b.code === 'humor');
+    expect(tech).toBeDefined();
+    expect(humor).toBeDefined();
+
+    const created = await createGroup(token, {
+      name: 'g',
+      botIds: [tech!.id, humor!.id],
+      responseMode: 'RANDOM_ONE', // 显式 @ 应覆盖随机策略
+    });
+    const groupId = created.body.group.id as string;
+
+    // 按 @ 顺序：幽默机器人先、技术机器人后；@ 顺序与消息内容一致
+    const res = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: `@${humor!.name} 先来一句 @${tech!.name} 再来分析` });
+
+    expect(res.status).toBe(201);
+    expect(res.body.botMessages).toHaveLength(2);
+    expect(res.body.botMessages[0].botId).toBe(humor!.id);
+    expect(res.body.botMessages[1].botId).toBe(tech!.id);
+  });
+
+  it('mentioning only a real member triggers no bot replies', async () => {
+    const owner = await registerUser(app, 'groupowner');
+    const member = await registerUser(app, 'groupmember');
+    const bots = await prisma.bot.findMany({ select: { id: true, code: true } });
+    const tech = bots.find((b) => b.code === 'tech');
+    const humor = bots.find((b) => b.code === 'humor');
+
+    const created = await createGroup(owner.token, {
+      name: 'g',
+      botIds: [tech!.id, humor!.id],
+      responseMode: 'ALL_BOTS',
+    });
+    const groupId = created.body.group.id as string;
+    // 先把 member 加入群组，使其成为可被 @ 的合法成员
+    await request(app)
+      .post(`/api/groups/${groupId}/members`)
+      .set(auth(owner.token))
+      .send({ username: member.user.username });
+
+    // 只 @ 真人 → 消息明确指向真人，本轮不触发任何机器人（由真人本人回复）
+    const res = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(owner.token))
+      .send({ content: `@${member.user.username} 你方便的话回一下` });
+
+    expect(res.status).toBe(201);
+    expect(res.body.botMessages).toHaveLength(0);
+  });
+
+  it('rejects mentions of names not in the group with 400 MENTION_NOT_FOUND', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: 'g', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    // 「不存在的人」既不是群组机器人也不是群组成员 → 400，并带 details 说明非法名称
+    const res = await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '@不存在的人 你好，请问在吗' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('MENTION_NOT_FOUND');
+    expect(res.body.error.details.mentions).toContain('不存在的人');
+  });
+
+  it('keeps sender names in history after a bot is removed from the group', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const bots = await prisma.bot.findMany({ select: { id: true, code: true, name: true } });
+    const tech = bots.find((b) => b.code === 'tech');
+    const humor = bots.find((b) => b.code === 'humor');
+    expect(tech).toBeDefined();
+    expect(humor).toBeDefined();
+
+    const created = await createGroup(token, {
+      name: 'g',
+      botIds: [tech!.id, humor!.id],
+      responseMode: 'ALL_BOTS',
+    });
+    const groupId = created.body.group.id as string;
+    await request(app)
+      .post(`/api/groups/${groupId}/messages`)
+      .set(auth(token))
+      .send({ content: '大家好' });
+
+    // 移除 humor 机器人后再看历史：它发的消息仍应带原名，而不是退化为「机器人」
+    const removed = await request(app)
+      .delete(`/api/groups/${groupId}/bots/${humor!.id}`)
+      .set(auth(token));
+    expect(removed.status).toBe(200);
+
+    const history = await request(app).get(`/api/groups/${groupId}/messages`).set(auth(token));
+    const humorMessage = history.body.messages.find(
+      (m: { botId: string | null }) => m.botId === humor!.id,
+    );
+    expect(humorMessage).toBeDefined();
+    expect(humorMessage.senderName).toBe(humor!.name);
   });
 
   it('prevents bot loops: bot replies never trigger new rounds and max cap applies', async () => {

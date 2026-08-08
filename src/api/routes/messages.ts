@@ -83,7 +83,7 @@ export function createMessagesRouter(deps: { aiService: AiService }) {
    */
   router.post('/:id/retry', async (req, res) => {
     const user = requireUser(req);
-    const aiMessage = await retryAiMessage(deps.aiService, user.id, paramId(req));
+    const aiMessage = await retryAiMessage(deps.aiService, user.id, user.username, paramId(req));
     res.json({ aiMessage });
   });
 

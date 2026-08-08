@@ -91,6 +91,8 @@ export interface GroupMessage {
   senderType: 'HUMAN' | 'BOT';
   userId: string | null;
   botId: string | null;
+  /** 发送者展示名：真人=昵称，机器人=名称；历史消息不因成员离开/机器人移除而丢失名字 */
+  senderName: string | null;
   content: string;
   status: 'PENDING' | 'SENT' | 'FAILED';
   createdAt: string;

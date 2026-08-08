@@ -486,7 +486,13 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
    */
   conversationsRouter.post('/:id/messages', validate(sendMessageSchema), async (req, res) => {
     const user = requireUser(req);
-    const result = await sendMessage(deps.aiService, user.id, paramId(req), req.body);
+    const result = await sendMessage(
+      deps.aiService,
+      user.id,
+      paramId(req),
+      user.username,
+      req.body,
+    );
     res.status(201).json(result);
   });
 

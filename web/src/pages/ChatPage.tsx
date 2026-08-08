@@ -12,9 +12,12 @@ import { useParams } from 'react-router-dom';
 
 import { api, ApiError } from '../api/client.js';
 import type { Conversation, Message, SendMessageResult } from '../api/types.js';
+import { useAuth } from '../auth/AuthContext.js';
+import MentionText from '../components/MentionText.js';
 
 export default function ChatPage() {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
 
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -155,7 +158,8 @@ export default function ChatPage() {
               {message.senderType === 'BOT' && <div className="avatar-sm bot">AI</div>}
               <div className="message-content">
                 <div className="message-author">
-                  {message.senderType === 'HUMAN' ? '我' : 'AI 助手'}
+                  {/* 自己的消息显示用户名而不是「我」，便于多端对照发言者 */}
+                  {message.senderType === 'HUMAN' ? (user?.username ?? '我') : 'AI 助手'}
                 </div>
                 <div
                   className={`bubble ${message.senderType === 'HUMAN' ? 'user' : 'bot'} ${
@@ -174,12 +178,16 @@ export default function ChatPage() {
                       </button>
                     </>
                   ) : (
-                    message.content
+                    <MentionText text={message.content} />
                   )}
                 </div>
               </div>
               {/* 用户消息：头像在右 */}
-              {message.senderType === 'HUMAN' && <div className="avatar-sm user">我</div>}
+              {message.senderType === 'HUMAN' && (
+                <div className="avatar-sm user">
+                  {user?.username?.slice(0, 1).toUpperCase() ?? '我'}
+                </div>
+              )}
             </div>
           ))}
           <div ref={bottomRef} />

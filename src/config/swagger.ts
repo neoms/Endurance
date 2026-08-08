@@ -454,6 +454,12 @@ const options: swaggerJsdoc.Options = {
             },
             userId: { type: 'string', nullable: true, description: '人类发言者 id' },
             botId: { type: 'string', nullable: true, description: '机器人 id' },
+            senderName: {
+              type: 'string',
+              nullable: true,
+              description:
+                '发送者展示名（真人=昵称，机器人=名称）；随消息返回，历史消息不因成员离开/机器人移除而丢失名字',
+            },
             content: { type: 'string', description: '消息内容' },
             status: {
               type: 'string',

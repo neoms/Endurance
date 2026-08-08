@@ -603,6 +603,11 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *     tags: [Groups]
    *     summary: 发送群组消息（触发机器人回复）
    *     description: 人类成员发言，并按群组响应策略触发一个或多个机器人回复；
+   *       支持 @提及：@机器人名 时仅被 @ 的机器人按出现顺序回复（覆盖响应策略与每轮上限）；
+   *       只要消息中存在 @提及（含只 @ 真人）→ 仅被 @ 的对象回复，
+   *       未提及的机器人不回复（只 @ 真人时本轮无机器人回复，由真人本人回复）；
+   *       被 @ 的名称必须存在于当前群组，否则返回 400 MENTION_NOT_FOUND；
+   *       消息中没有任何 @ 时才按响应策略回复；
    *       每轮回复数受 maxConsecutiveBotReplies 限制（防循环），
    *       生成失败时以兜底文案占位，保证至少有一个机器人回复；
    *       携带 clientRequestId 可在同一群组内幂等去重（重复提交返回首次轮次结果）；
@@ -629,6 +634,12 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *           application/json:
    *             schema:
    *               $ref: '#/components/schemas/SendGroupMessageResult'
+   *       '400':
+   *         description: 消息中的 @名称不在当前群组内（MENTION_NOT_FOUND）
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
    *       '401':
    *         description: 未登录或 token 无效
    *         content:

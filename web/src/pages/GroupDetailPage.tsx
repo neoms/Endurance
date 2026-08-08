@@ -7,12 +7,36 @@
  * - 右侧：群聊窗口（人类/机器人发言，发送消息触发机器人回复）；
  * - 成员可离开群组；创建者可添加/移除成员与机器人。
  */
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, ApiError } from '../api/client.js';
 import type { Bot, Group, GroupMessage, SendGroupMessageResult } from '../api/types.js';
 import { useAuth } from '../auth/AuthContext.js';
+import MentionText from '../components/MentionText.js';
+
+/**
+ * 计算光标处「正在输入的 @提及」（未闭合的 @token）
+ *
+ * @param text  输入框当前完整文本
+ * @param caret 光标位置（selectionStart）
+ * @returns { start, query } | null
+ *   - start：@ 符号在文本中的下标（替换时从这里截断）；
+ *   - query：@ 之后的已输入前缀（可为空串，表示刚输入 @ 还没打字）；
+ *   - null：光标前没有正在输入的 @（例如 @ 前是空白、已输入完名称后跟空格，
+ *     或 @ 前是字母数字——邮箱 a@b.com 不算提及，与后端解析规则一致）。
+ */
+function getActiveMention(text: string, caret: number): { start: number; query: string } | null {
+  const before = text.slice(0, caret);
+  // 从光标处向前匹配「非字母数字/下划线（或行首）@ 名称前缀$」：
+  // - [^\s@，。！？!?；;：:]* 允许前缀为空（刚输入 @）或部分名称；
+  // - 前面的字符类排除邮箱场景（a@b.com 中 @ 前是字母 a，不满足）。
+  const match = /(^|[^a-zA-Z0-9_])@([^\s@，。！？!?；;：:]*)$/.exec(before);
+  if (!match) {
+    return null;
+  }
+  return { start: match.index + (match[1]?.length ?? 0), query: match[2] ?? '' };
+}
 
 export default function GroupDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -38,11 +62,53 @@ export default function GroupDetailPage() {
   const [editMaxReplies, setEditMaxReplies] = useState(3);
   const [savingConfig, setSavingConfig] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // 消息输入框 DOM 引用（@提及补全需要按光标位置插入文本并重新聚焦）
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   // 当前待发送消息的幂等键：发送失败后保留，重试同一条消息时后端去重；
   // 发送成功或用户修改输入后清空（幂等键只对同一条消息有效）
   const requestIdRef = useRef<string | null>(null);
+  // @提及补全状态：mentionQuery 非 null 表示正在输入 @（值为 @ 后的前缀，可为空串）
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  // 候选列表中当前高亮的项（配合 ↑/↓ 键盘导航）
+  const [mentionIndex, setMentionIndex] = useState(0);
 
   const isOwner = user !== null && group?.creatorId === user.id;
+
+  /**
+   * @提及补全候选：当前群组成员（用户名）+ 群组机器人（名称），按前缀过滤。
+   * 说明：候选与后端校验规则一一对应——真人按用户名、机器人按名称，
+   * 因此这里列出的每一项都能被后端正确解析（@ 真人合法但不触发逻辑）。
+   */
+  const mentionCandidates = useMemo(() => {
+    if (!group || mentionQuery === null) {
+      return [];
+    }
+    const q = mentionQuery.toLowerCase();
+    const members = group.members
+      // 候选列表不包含当前登录用户自己（@ 自己没有意义）
+      .filter((m) => m.userId !== user?.id)
+      .filter((m) => q === '' || m.username.toLowerCase().includes(q))
+      .map((m) => ({
+        key: `user:${m.userId}`,
+        label: m.username,
+        sub: m.displayName,
+        kind: 'user' as const,
+      }));
+    const bots = group.bots
+      .filter((b) => q === '' || b.name.toLowerCase().includes(q))
+      .map((b) => ({
+        key: `bot:${b.id}`,
+        label: b.name,
+        sub: '机器人',
+        kind: 'bot' as const,
+      }));
+    return [...members, ...bots];
+  }, [group, mentionQuery, user?.id]);
+
+  // 查询条件变化时把键盘高亮重置到第一项
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [mentionQuery]);
 
   /**
    * 加载群组详情、可用机器人与最近历史消息（默认返回最近 50 条，升序）
@@ -108,9 +174,16 @@ export default function GroupDetailPage() {
     prevFirstId.current = firstId;
   }, [messages]);
 
-  /** 机器人 id → 名称映射（渲染消息时显示发言者） */
+  /**
+   * 机器人 id → 名称映射（兜底用）
+   *
+   * 优先从「当前群组机器人」里找，其次从「全量机器人列表」找
+   * （机器人被移出群组后仍存在于全量列表，历史消息能显示原名）；
+   * 正常路径下后端已在消息里返回 senderName，这里仅兜底。
+   */
   const botNameById = (botId: string | null): string => {
-    const bot = group?.bots.find((b) => b.id === botId);
+    if (!botId) return '机器人';
+    const bot = group?.bots.find((b) => b.id === botId) ?? bots.find((b) => b.id === botId);
     return bot?.name ?? '机器人';
   };
 
@@ -141,6 +214,42 @@ export default function GroupDetailPage() {
     } finally {
       setSending(false);
     }
+  };
+
+  /**
+   * 从候选列表中选择 @ 对象：用「@名称 」替换光标处未闭合的 @token
+   *
+   * @param candidate 被选中的候选（真人用户名或机器人名称）
+   * 逻辑：定位光标前的 @ 起始位置 → 保留 @ 之前与光标之后的内容 →
+   * 插入「@label 」→ 关闭候选列表并把光标移到插入文本末尾。
+   */
+  const selectMention = (candidate: {
+    key: string;
+    label: string;
+    sub: string;
+    kind: 'user' | 'bot';
+  }) => {
+    const el = inputRef.current;
+    if (!el) {
+      return;
+    }
+    const caret = el.selectionStart ?? input.length;
+    const active = getActiveMention(input, caret);
+    if (!active) {
+      return;
+    }
+    const inserted = `@${candidate.label} `;
+    const next = input.slice(0, active.start) + inserted + input.slice(caret);
+    setInput(next);
+    setMentionQuery(null);
+    // 内容变化 → 幂等键失效（与手动输入一致）
+    requestIdRef.current = null;
+    // 光标移动到插入文本之后并保持聚焦，方便继续输入
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = active.start + inserted.length;
+      el.setSelectionRange(pos, pos);
+    });
   };
 
   /**
@@ -247,53 +356,133 @@ export default function GroupDetailPage() {
                 </button>
               </div>
             )}
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`message-row ${message.senderType === 'HUMAN' ? 'user' : 'bot'}`}
-              >
-                {/* 机器人消息：头像在左（用机器人名首字占位） */}
-                {message.senderType === 'BOT' && (
-                  <div className="avatar-sm bot">{botNameById(message.botId).slice(0, 1)}</div>
-                )}
-                <div className="message-content">
-                  <div className="message-author">
-                    {message.senderType === 'HUMAN' ? '我' : botNameById(message.botId)}
+            {messages.map((message) => {
+              // 仅「当前登录用户」自己发的消息靠右显示「我」；
+              // 其他人（含其他真人）的消息一律靠左并显示发言者名字
+              const isMine = message.senderType === 'HUMAN' && message.userId === user?.id;
+              // 发言者展示名：优先用后端随消息返回的 senderName（历史消息不因
+              // 成员离开/机器人移除而丢失名字），机器人消息再兜底查机器人列表
+              const senderName =
+                message.senderType === 'HUMAN'
+                  ? (message.senderName ?? '用户')
+                  : (message.senderName ?? botNameById(message.botId));
+              return (
+                <div key={message.id} className={`message-row ${isMine ? 'user' : 'bot'}`}>
+                  {/* 非自己发的消息：头像在左（真人灰底 / 机器人绿底，首字占位） */}
+                  {!isMine && (
+                    <div
+                      className={`avatar-sm ${message.senderType === 'HUMAN' ? 'other' : 'bot'}`}
+                    >
+                      {senderName.slice(0, 1)}
+                    </div>
+                  )}
+                  <div className="message-content">
+                    {/* 自己的消息显示用户名而不是「我」 */}
+                    <div className="message-author">
+                      {isMine ? (user?.username ?? '我') : senderName}
+                    </div>
+                    <div
+                      className={`bubble ${
+                        isMine ? 'user' : message.senderType === 'HUMAN' ? 'other' : 'bot'
+                      }`}
+                    >
+                      <MentionText text={message.content} />
+                    </div>
                   </div>
-                  <div className={`bubble ${message.senderType === 'HUMAN' ? 'user' : 'bot'}`}>
-                    {message.content}
-                  </div>
+                  {/* 自己的消息：头像在右 */}
+                  {isMine && (
+                    <div className="avatar-sm user">
+                      {user?.username?.slice(0, 1).toUpperCase() ?? '我'}
+                    </div>
+                  )}
                 </div>
-                {/* 用户消息：头像在右 */}
-                {message.senderType === 'HUMAN' && <div className="avatar-sm user">我</div>}
-              </div>
-            ))}
+              );
+            })}
             <div ref={bottomRef} />
           </div>
         </div>
         <div className="chat-input-wrap">
           <div className="error-text">{error}</div>
-          <form className="chat-input" onSubmit={(e) => void send(e)}>
-            <textarea
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value);
-                // 输入内容变化 → 清空幂等键（新内容必须使用新键）
-                requestIdRef.current = null;
-              }}
-              placeholder="发送消息，机器人将按策略回复…"
-              onKeyDown={(e) => {
-                // isComposing：中文输入法按回车「上屏」时不触发发送，避免发出不完整的输入内容
-                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  void send(e);
-                }
-              }}
-            />
-            <button type="submit" className="send-btn" disabled={sending || !input.trim()}>
-              ➤
-            </button>
-          </form>
+          <div className="mention-picker-wrap">
+            {/* @提及补全候选列表：输入 @ 且存在候选时弹出（悬浮于输入框上方） */}
+            {mentionQuery !== null && (
+              <div className="mention-picker" onMouseDown={(e) => e.preventDefault()}>
+                {mentionCandidates.length === 0 ? (
+                  <div className="mention-picker-empty">没有匹配的用户或机器人</div>
+                ) : (
+                  mentionCandidates.map((candidate, index) => (
+                    <button
+                      key={candidate.key}
+                      type="button"
+                      className={`mention-option ${index === mentionIndex ? 'active' : ''}`}
+                      onClick={() => selectMention(candidate)}
+                    >
+                      <span className="mention-option-avatar">
+                        {candidate.label.slice(0, 1).toUpperCase()}
+                      </span>
+                      <span className="mention-option-label">@{candidate.label}</span>
+                      <span className="mention-option-sub">{candidate.sub}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+            <form className="chat-input" onSubmit={(e) => void send(e)}>
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setInput(value);
+                  // 输入内容变化 → 清空幂等键（新内容必须使用新键）
+                  requestIdRef.current = null;
+                  // 根据光标位置实时计算 @提及补全：正在输入 @ 时弹出候选列表
+                  const caret = e.target.selectionStart ?? value.length;
+                  const active = getActiveMention(value, caret);
+                  setMentionQuery(active ? active.query : null);
+                }}
+                placeholder="发送消息，可 @机器人名 / @用户名…"
+                onKeyDown={(e) => {
+                  // 中文输入法组合状态（选字上屏）不参与补全与发送
+                  if (e.nativeEvent.isComposing) {
+                    return;
+                  }
+                  // @补全打开时：↑/↓ 切换候选、回车选中、Esc 关闭
+                  if (mentionQuery !== null && mentionCandidates.length > 0) {
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      setMentionIndex((i) => (i + 1) % mentionCandidates.length);
+                      return;
+                    }
+                    if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      setMentionIndex(
+                        (i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length,
+                      );
+                      return;
+                    }
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      selectMention(mentionCandidates[mentionIndex] ?? mentionCandidates[0]!);
+                      return;
+                    }
+                  }
+                  if (e.key === 'Escape') {
+                    setMentionQuery(null);
+                    return;
+                  }
+                  // 普通回车（非 Shift+Enter）发送消息
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void send(e);
+                  }
+                }}
+              />
+              <button type="submit" className="send-btn" disabled={sending || !input.trim()}>
+                ➤
+              </button>
+            </form>
+          </div>
         </div>
       </div>
 

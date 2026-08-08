@@ -85,7 +85,11 @@ export class MockAiProvider implements AiProvider {
       const reply = RANDOM_REPLIES[Math.floor(Math.random() * RANDOM_REPLIES.length)];
       return { content: `${prefix}${reply}` };
     }
-    return { content: `${prefix}你说：「${context.content}」——这是一条模拟回复。` };
+    // 回显消息时带上「发送者用户名」，而不是写死「你说」——
+    // 用户名由消息服务在调用时传入（个人对话取当前用户，群组取实际发言成员）。
+    return {
+      content: `${prefix}${context.userName ?? '用户'}说：「${context.content}」——这是一条模拟回复。`,
+    };
   }
 }
 
