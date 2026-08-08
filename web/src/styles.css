@@ -340,6 +340,9 @@ body {
   align-items: center;
   justify-content: center;
   z-index: 40;
+  /* 内容超高时的兜底滚动：小屏或极端内容下遮罩本身可滚动 */
+  overflow-y: auto;
+  padding: 24px 0;
 }
 
 .modal {
@@ -348,6 +351,9 @@ body {
   padding: 20px;
   width: 360px;
   max-width: 92vw;
+  /* 弹窗高度受视口约束：超高时内部滚动，绝不超出屏幕边界 */
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.16);
 }
 
@@ -371,6 +377,11 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
+  /* 吸底：滚动机器人列表时「取消/创建」始终可见，无需滚到底再操作 */
+  position: sticky;
+  bottom: 0;
+  padding-top: 8px;
+  background: var(--card);
 }
 
 /* 新建群组悬浮框：机器人选择卡片（名称 + 性格描述，选中态绿色高亮） */
@@ -417,6 +428,11 @@ body {
 .bot-card-personality {
   font-size: 12px;
   color: var(--muted);
+  /* 人设预览最多两行：长人设提示词不会把卡片撑高，超长省略 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .bot-card.selected .bot-card-personality {
