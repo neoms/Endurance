@@ -234,6 +234,176 @@ export async function sendMessage(
 }
 
 /**
+ * 流式发送过程的事件回调（由路由层翻译为 SSE 帧）
+ *
+ * @property userMessage 用户消息已落库（前端据此渲染用户气泡）
+ * @property aiDelta     AI 回复增量文本（前端逐块追加到 PENDING 气泡）
+ * @property aiDone      AI 回复已完整落库（SENT，携带最终完整消息）
+ * @property aiError     AI 回复重试耗尽失败（FAILED 占位，携带错误信息）
+ */
+export interface MessageStreamEvents {
+  userMessage?: (message: MessageOutput) => void;
+  aiDelta?: (delta: string) => void;
+  aiDone?: (message: MessageOutput) => void;
+  aiError?: (message: MessageOutput) => void;
+}
+
+/**
+ * 流式发送消息（用户消息落库 + AI 回复流式生成与落库）
+ *
+ * @param aiService      AI 服务（流式重试/空闲超时）
+ * @param userId         当前用户 id
+ * @param conversationId 目标对话 id
+ * @param userName       当前用户用户名（供 AI 回显「用户名说：」）
+ * @param input          { content, clientRequestId? }
+ * @param events         流式事件回调（userMessage/aiDelta/aiDone/aiError）
+ * @param clientSignal   可选：客户端断连信号（断连时中止 AI 调用并落 FAILED）
+ * @returns Promise<void> 流结束或失败后 resolve（错误以 aiError 事件反馈）
+ * @throws AppError(404) 对话不存在或不属于当前用户（发生在任何事件发出之前）
+ *
+ * 与 sendMessage 的差异（数据一致性设计）：
+ * - AI 回复在生成前就落库为 PENDING（拿到稳定消息 id），前端立即有占位气泡；
+ * - 每个增量块通过 aiDelta 事件透传，同时在内存累积；
+ * - 全部块接收完后一次性更新为 SENT（完整内容）；中途失败则更新为 FAILED，
+ *   已产出的部分内容保留（用户能看到「说到一半」的回复）并记录 errorCode；
+ * - 幂等命中直接回放 userMessage + aiDone（复用既有记录），不重复生成。
+ */
+export async function streamSendMessage(
+  aiService: AiService,
+  userId: string,
+  conversationId: string,
+  userName: string,
+  input: SendMessageInput,
+  events: MessageStreamEvents = {},
+  clientSignal?: AbortSignal,
+): Promise<void> {
+  // ACL：仅对话所有者可发送消息（锁外快速失败，避免非所有者阻塞在锁队列）
+  await assertConversationOwnership(userId, conversationId);
+
+  await conversationLocks(conversationId, async () => {
+    // 锁内再次确认对话存在且属于当前用户：防止「锁外校验后对话被并发删除」的竞态
+    const alive = await prisma.conversation.findFirst({
+      where: { id: conversationId, userId },
+      select: { id: true },
+    });
+    if (!alive) {
+      throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversation not found');
+    }
+
+    const content = input.content.trim();
+
+    // 幂等：以「对话 + clientRequestId」复合键查找（唯一约束见 schema）。
+    // 命中时直接回放首次结果（用户消息 + 完整 AI 回复），不重复生成。
+    if (input.clientRequestId) {
+      const existing = await prisma.message.findUnique({
+        where: {
+          conversationId_clientRequestId: {
+            conversationId,
+            clientRequestId: input.clientRequestId,
+          },
+        },
+      });
+      if (existing) {
+        const existingAi = await prisma.message.findFirst({
+          where: {
+            conversationId,
+            senderType: SenderType.BOT,
+            createdAt: { gt: existing.createdAt },
+          },
+          orderBy: { createdAt: 'asc' },
+        });
+        logger.debug({ clientRequestId: input.clientRequestId }, 'message: stream idempotent hit');
+        events.userMessage?.(toMessageOutput(existing));
+        if (existingAi) {
+          events.aiDone?.(toMessageOutput(existingAi));
+        }
+        return;
+      }
+    }
+
+    // 第一步：用户消息立即落库（即使 AI 失败也不丢失）
+    const userMessage = await prisma.message.create({
+      data: {
+        conversationId,
+        senderType: SenderType.HUMAN,
+        senderUserId: userId,
+        content,
+        status: MessageStatus.SENT,
+        clientRequestId: input.clientRequestId,
+      },
+    });
+
+    // 第二步：默认标题替换 + 刷新对话 updatedAt（列表按最近活跃排序）
+    await maybeSetDefaultTitle(conversationId, content);
+    await prisma.conversation.update({
+      where: { id: conversationId },
+      data: { updatedAt: new Date() },
+    });
+    const history = await buildHistory(conversationId, userMessage.id);
+
+    // 第三步：AI 回复先以 PENDING 落库占位（拿到稳定消息 id），
+    // 流式块到达后再在内存累积，全部完成后一次性更新为 SENT。
+    const aiMessage = await prisma.message.create({
+      data: {
+        conversationId,
+        senderType: SenderType.BOT,
+        content: '',
+        status: MessageStatus.PENDING,
+      },
+    });
+
+    // 先通知前端用户消息已落库，再开始推送 AI 增量
+    events.userMessage?.(toMessageOutput(userMessage));
+
+    // 第四步：流式生成（含重试与空闲超时），逐块回调并累积完整回复
+    let partial = '';
+    try {
+      for await (const delta of aiService.streamWithRetry(
+        { content, history, userName },
+        { clientSignal },
+      )) {
+        partial += delta;
+        events.aiDelta?.(delta);
+      }
+      // 第五步：流正常结束 → 更新为 SENT（完整内容）
+      const saved = await prisma.message.update({
+        where: { id: aiMessage.id },
+        data: { content: partial, status: MessageStatus.SENT, errorCode: null, errorMessage: null },
+      });
+      logger.info(
+        { userId, conversationId, aiMessageId: saved.id, chars: saved.content.length },
+        'message: stream ai reply saved',
+      );
+      events.aiDone?.(toMessageOutput(saved));
+    } catch (err) {
+      // 重试耗尽/客户端断连/流中断：更新为 FAILED 并保留已产出部分内容，
+      // 前端可见「回复中断/失败」并展示部分文本与重试入口
+      const info = toAiErrorInfo(err);
+      const saved = await prisma.message.update({
+        where: { id: aiMessage.id },
+        data: {
+          content: partial,
+          status: MessageStatus.FAILED,
+          errorCode: info.code,
+          errorMessage: info.message,
+        },
+      });
+      logger.error(
+        {
+          userId,
+          conversationId,
+          aiMessageId: saved.id,
+          errorCode: info.code,
+          partialChars: partial.length,
+        },
+        'message: stream ai reply failed',
+      );
+      events.aiError?.(toMessageOutput(saved));
+    }
+  });
+}
+
+/**
  * 历史消息分页查询（游标分页，按时间升序）
  *
  * @param userId         当前用户 id

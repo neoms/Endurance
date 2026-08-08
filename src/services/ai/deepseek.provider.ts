@@ -54,6 +54,16 @@ interface DeepSeekChatResponse {
 }
 
 /**
+ * DeepSeek Chat Completions 流式响应块结构（SSE 的每条 data）
+ *
+ * @property choices[].delta.content 本块的增量文本（流式时逐块累积）
+ * @property choices[].delta.reasoning_content 思考过程文本（V4 关闭思考时不存在，忽略）
+ */
+interface DeepSeekChatStreamChunk {
+  choices?: Array<{ delta?: { content?: string; reasoning_content?: string } }>;
+}
+
+/**
  * DeepSeek AI Provider 实现
  */
 export class DeepSeekProvider implements AiProvider {
@@ -85,6 +95,125 @@ export class DeepSeekProvider implements AiProvider {
     context: AiGenerateContext,
     options?: AiGenerateOptions,
   ): Promise<AiGenerateResult> {
+    // 发起一次性（非流式）请求；网络/HTTP 错误处理统一收敛在私有方法里
+    const response = await this.request(context, options, false);
+
+    const data = (await response.json()) as DeepSeekChatResponse;
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) {
+      // 空内容视为临时故障（可重试），避免把「无回复」误当成功写入消息
+      throw new AiError('DeepSeek returned empty content', 'AI_UNAVAILABLE', true);
+    }
+
+    logger.debug(
+      { model: data.model ?? this.model, usage: data.usage },
+      'ai: deepseek reply received',
+    );
+    return { content };
+  }
+
+  /**
+   * 流式生成回复（SSE 增量解析）
+   *
+   * @param context 生成上下文（与 generate 一致）
+   * @param options 单次调用选项（signal 透传 fetch；超时取消由 AiService 触发）
+   * @returns AsyncIterable<string> 逐块产出增量文本，全部拼接即为完整回复
+   * @throws AiError 网络错误/HTTP 错误/流中断（分类与 generate 一致）
+   * 主要逻辑：以 stream:true 发起请求 → 逐行解析 SSE 的 data 帧 →
+   * 累积 choices[0].delta.content 并逐块产出 → 遇到 [DONE] 结束；
+   * 若一个字符都没产出则视为空回复（可重试），避免把空流当成功。
+   */
+  async *stream(context: AiGenerateContext, options?: AiGenerateOptions): AsyncIterable<string> {
+    // 流式请求：headers/鉴权/thinking 开关等逻辑与 generate 完全一致
+    const response = await this.request(context, options, true);
+
+    // 读取响应体字节流；拿不到 reader 视为服务端异常（可重试）
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new AiError('DeepSeek stream body unavailable', 'AI_UNAVAILABLE', true);
+    }
+
+    const decoder = new TextDecoder();
+    // SSE 按行到达，跨 chunk 的半行暂存在 buffer 里，等完整行再解析
+    let buffer = '';
+    let yieldedAny = false;
+    // 是否收到上游 [DONE] 结束标记（决定是否提前结束读取）
+    let streamDone = false;
+
+    try {
+      // 循环读取字节流，直到服务端结束（done=true）
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+
+        // 按换行符切出完整行处理（多余字节留在 buffer 等待下个 chunk）
+        let newlineIndex: number;
+        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+          if (!line.startsWith('data:')) {
+            // 非 data 行（如注释/心跳/空行）直接忽略
+            continue;
+          }
+          const payload = line.slice(5).trim();
+          if (payload === '[DONE]') {
+            // 上游结束标记：跳出逐行处理与字节读取两层循环
+            streamDone = true;
+            break;
+          }
+          try {
+            const chunk = JSON.parse(payload) as DeepSeekChatStreamChunk;
+            const delta = chunk.choices?.[0]?.delta?.content;
+            if (delta) {
+              yieldedAny = true;
+              yield delta;
+            }
+          } catch {
+            // 个别 data 帧无法解析：记录日志后跳过，不让整个流崩掉
+            logger.warn({ payload: payload.slice(0, 120) }, 'ai: deepseek stream parse error');
+          }
+        }
+        if (streamDone) {
+          break;
+        }
+      }
+    } catch (err) {
+      // 信号中止（空闲超时/客户端断连）→ 可重试错误，交给 AiService 决策
+      if (options?.signal?.aborted) {
+        throw new AiError('DeepSeek stream aborted', 'AI_ABORTED', true);
+      }
+      // 网络层中断（连接被上游掐断等）→ 可重试错误
+      logger.warn({ err }, 'ai: deepseek stream interrupted');
+      throw new AiError(
+        err instanceof Error ? err.message : 'DeepSeek stream error',
+        'AI_UNAVAILABLE',
+        true,
+      );
+    }
+
+    // 流正常结束但一个字符都没有：按空回复处理（可重试），避免把空流当成功
+    if (!yieldedAny) {
+      throw new AiError('DeepSeek returned empty stream', 'AI_UNAVAILABLE', true);
+    }
+  }
+
+  /**
+   * 发起 Chat Completions 请求（流式/非流式共用）
+   *
+   * @param context 生成上下文（组装 messages）
+   * @param options 单次调用选项（signal 透传）
+   * @param stream  是否流式（true → body.stream=true，返回后由调用方解析 SSE）
+   * @returns Promise<Response> 已确认非错误状态的 HTTP 响应
+   * @throws AiError 网络错误（可重试）或 HTTP 错误（429/5xx 可重试，其余 4xx 不可重试）
+   */
+  private async request(
+    context: AiGenerateContext,
+    options: AiGenerateOptions | undefined,
+    stream: boolean,
+  ): Promise<Response> {
     // 消息组装全部来自 prompts 模块（纯函数，提示词集中管理、可单测）
     const messages = buildChatMessages(context);
 
@@ -102,7 +231,7 @@ export class DeepSeekProvider implements AiProvider {
           messages,
           temperature: 0.8,
           max_tokens: 1024,
-          stream: false,
+          stream,
           // deepseek-v4-flash 默认开启思考模式；本应用按需求显式关闭，
           // 换取更低延迟与更快响应（快速问答场景不需要深度推理）。
           // 注意：thinking 开关仅 V4 系列支持；其他模型（如 deepseek-chat）
@@ -145,17 +274,6 @@ export class DeepSeekProvider implements AiProvider {
       );
     }
 
-    const data = (await response.json()) as DeepSeekChatResponse;
-    const content = data.choices?.[0]?.message?.content?.trim();
-    if (!content) {
-      // 空内容视为临时故障（可重试），避免把「无回复」误当成功写入消息
-      throw new AiError('DeepSeek returned empty content', 'AI_UNAVAILABLE', true);
-    }
-
-    logger.debug(
-      { model: data.model ?? this.model, usage: data.usage },
-      'ai: deepseek reply received',
-    );
-    return { content };
+    return response;
   }
 }

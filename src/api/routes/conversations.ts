@@ -29,10 +29,11 @@ import {
   removeTagFromConversation,
   updateConversationTitle,
 } from '../../services/conversation.service.js';
-import { listMessages, sendMessage } from '../../services/message.service.js';
+import { listMessages, sendMessage, streamSendMessage } from '../../services/message.service.js';
 import { authRequired, requireUser } from '../middleware/auth.js';
 import { paramId } from '../middleware/params.js';
 import { validate } from '../middleware/validate.js';
+import { sendSseError, sendSseEvent, startSse } from '../sse.js';
 import {
   addTagSchema,
   createConversationSchema,
@@ -434,6 +435,8 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
    *
    * 入参：{ content, clientRequestId? }；返回值：201 { userMessage, aiMessage }。
    * AI 调用重试耗尽时 aiMessage.status=FAILED 并携带 errorCode，用户消息始终保存。
+   * 查询参数：stream=true 时改用 SSE 流式输出（事件：user_message / ai_delta /
+   * ai_done / ai_error / error），适合打字机效果的聊天界面。
    *
    * @openapi
    * /api/conversations/{id}/messages:
@@ -443,6 +446,9 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
    *     description: 保存用户消息并调用 AI 生成回复；用户消息先落库，
    *       AI 重试耗尽时回复以 FAILED 状态占位（前端可展示「回复失败，可重试」）；
    *       携带 clientRequestId 可在同一对话内幂等去重（不同对话互不影响）。
+   *       查询参数 `stream=true` 时响应改为 text/event-stream：
+   *       依次推送 user_message（用户消息）、ai_delta（回复增量）、
+   *       ai_done（完整回复）或 ai_error（失败占位）；发生校验类错误时推送 error 事件。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -452,6 +458,13 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
    *         description: 对话 id
    *         schema:
    *           type: string
+   *       - name: stream
+   *         in: query
+   *         required: false
+   *         description: 传 true 时以 SSE 流式返回 AI 回复（默认 JSON 同步返回）
+   *         schema:
+   *           type: boolean
+   *           default: false
    *     requestBody:
    *       required: true
    *       content:
@@ -486,10 +499,54 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
    */
   conversationsRouter.post('/:id/messages', validate(sendMessageSchema), async (req, res) => {
     const user = requireUser(req);
+    const conversationId = paramId(req);
+
+    // 流式模式：SSE 逐块推送 AI 回复（前端聊天页使用）；默认保持 JSON 同步返回
+    if (req.query.stream === 'true') {
+      // 客户端断连时 abort 底层 AI 调用：监听响应流 close（连接被终止时触发）
+      const controller = new AbortController();
+      let settled = false;
+      const onClose = () => {
+        if (!settled) {
+          controller.abort();
+        }
+      };
+      res.on('close', onClose);
+
+      startSse(res);
+      try {
+        await streamSendMessage(
+          deps.aiService,
+          user.id,
+          conversationId,
+          user.username,
+          req.body,
+          {
+            userMessage: (message) => sendSseEvent(res, 'user_message', { message }),
+            aiDelta: (delta) => sendSseEvent(res, 'ai_delta', { delta }),
+            aiDone: (message) => sendSseEvent(res, 'ai_done', { message }),
+            aiError: (message) => sendSseEvent(res, 'ai_error', { message }),
+          },
+          controller.signal,
+        );
+      } catch (err) {
+        // 首个事件发出前的失败（404 等）：以 error 事件告知前端
+        sendSseError(res, err);
+      } finally {
+        settled = true;
+        res.removeListener('close', onClose);
+        // 正常结束且尚未收尾时主动 end；客户端断连时 res 已结束，此调用无副作用
+        if (!res.writableEnded) {
+          res.end();
+        }
+      }
+      return;
+    }
+
     const result = await sendMessage(
       deps.aiService,
       user.id,
-      paramId(req),
+      conversationId,
       user.username,
       req.body,
     );

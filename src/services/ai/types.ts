@@ -13,6 +13,16 @@
 export interface AiProvider {
   readonly name: string;
   generate(context: AiGenerateContext, options?: AiGenerateOptions): Promise<AiGenerateResult>;
+  /**
+   * 流式生成（可选实现）：逐块产出回复文本
+   *
+   * @param context 生成上下文（与 generate 相同）
+   * @param options 单次调用选项（timeoutMs 由 AiService 解释为「空闲超时」）
+   * @returns AsyncIterable<string> 回复文本分块（按序拼接即为完整回复）
+   * 说明：实现方负责把流式传输协议（如 SSE）解析为纯文本块；
+   * 重试、空闲超时、取消由 AiService 统一处理，Provider 只需监听 signal 尽快中断。
+   */
+  stream?(context: AiGenerateContext, options?: AiGenerateOptions): AsyncIterable<string>;
 }
 
 /**

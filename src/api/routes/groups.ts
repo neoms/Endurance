@@ -29,6 +29,7 @@ import {
   removeBotFromGroup,
   removeGroupMember,
   sendGroupMessage,
+  streamSendGroupMessage,
   updateGroup,
 } from '../../services/group.service.js';
 import { authRequired, requireUser } from '../middleware/auth.js';
@@ -42,6 +43,7 @@ import {
   updateGroupSchema,
 } from '../validators/group.js';
 import { listMessagesQuerySchema, type ListMessagesQuery } from '../validators/message.js';
+import { sendSseError, sendSseEvent, startSse } from '../sse.js';
 
 /**
  * 创建群组路由组
@@ -596,6 +598,8 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    * POST /api/groups/{id}/messages 发送群组消息（触发机器人回复）
    *
    * 入参：{ content, clientRequestId? }；返回值：201 { userMessage, botMessages }。
+   * 查询参数：stream=true 时改用 SSE 流式输出（事件：user_message / bot_start /
+   * bot_delta / bot_done / round_done / error），每个机器人依次流式推送。
    *
    * @openapi
    * /api/groups/{id}/messages:
@@ -611,7 +615,11 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *       每轮回复数受 maxConsecutiveBotReplies 限制（防循环），
    *       生成失败时以兜底文案占位，保证至少有一个机器人回复；
    *       携带 clientRequestId 可在同一群组内幂等去重（重复提交返回首次轮次结果）；
-   *       群组内没有启用状态的机器人时返回 409 NO_ACTIVE_BOT。
+   *       群组内没有启用状态的机器人时返回 409 NO_ACTIVE_BOT；
+   *       查询参数 `stream=true` 时响应改为 text/event-stream：
+   *       依次推送 user_message、bot_start（机器人开始回复，PENDING）、
+   *       bot_delta（回复增量）、bot_done（完整回复）、round_done（本轮结束）；
+   *       发生校验类错误时推送 error 事件。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -621,6 +629,13 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *         description: 群组 id
    *         schema:
    *           type: string
+   *       - name: stream
+   *         in: query
+   *         required: false
+   *         description: 传 true 时以 SSE 流式返回机器人回复（默认 JSON 同步返回）
+   *         schema:
+   *           type: boolean
+   *           default: false
    *     requestBody:
    *       required: true
    *       content:
@@ -667,6 +682,50 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    */
   router.post('/:id/messages', validate(sendGroupMessageSchema), async (req, res) => {
     const user = requireUser(req);
+    const groupId = paramId(req);
+
+    // 流式模式：SSE 逐块推送每个机器人的回复（前端群聊页使用）；默认保持 JSON 同步返回
+    if (req.query.stream === 'true') {
+      // 客户端断连时 abort 底层 AI 调用：监听响应流 close（连接被终止时触发）
+      const controller = new AbortController();
+      let settled = false;
+      const onClose = () => {
+        if (!settled) {
+          controller.abort();
+        }
+      };
+      res.on('close', onClose);
+
+      startSse(res);
+      try {
+        await streamSendGroupMessage(
+          deps.aiService,
+          user.id,
+          groupId,
+          req.body,
+          {
+            userMessage: (message) => sendSseEvent(res, 'user_message', { message }),
+            botStart: (message) => sendSseEvent(res, 'bot_start', { message }),
+            botDelta: (messageId, delta) => sendSseEvent(res, 'bot_delta', { messageId, delta }),
+            botDone: (message) => sendSseEvent(res, 'bot_done', { message }),
+            roundDone: () => sendSseEvent(res, 'round_done', { ok: true }),
+          },
+          controller.signal,
+        );
+      } catch (err) {
+        // 首个事件发出前的失败（404/409/400 等）：以 error 事件告知前端
+        sendSseError(res, err);
+      } finally {
+        settled = true;
+        res.removeListener('close', onClose);
+        // 正常结束且尚未收尾时主动 end；客户端断连时 res 已结束，此调用无副作用
+        if (!res.writableEnded) {
+          res.end();
+        }
+      }
+      return;
+    }
+
     const result = await sendGroupMessage(deps.aiService, user.id, paramId(req), req.body);
     res.status(201).json(result);
   });

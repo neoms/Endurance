@@ -195,6 +195,69 @@ describe('DeepSeekProvider', () => {
   });
 });
 
+describe('DeepSeekProvider stream', () => {
+  it('streams SSE chunks and joins them into the full reply', async () => {
+    // 构造两段 data 增量 + [DONE] 结束标记的 SSE 响应体
+    const sseBody = [
+      'data: {"choices":[{"delta":{"content":"你"}}]}',
+      '',
+      'data: {"choices":[{"delta":{"content":"好"}}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    let capturedBody: { stream: boolean; model: string } | undefined;
+    const provider = makeProvider(async (_url, init) => {
+      capturedBody = JSON.parse(String(init?.body));
+      return new Response(sseBody, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+
+    // 收集所有增量块并拼接
+    const chunks: string[] = [];
+    for await (const chunk of provider.stream({ content: 'hi' }, {})) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.join('')).toBe('你好');
+    // 流式请求体必须携带 stream: true，且 V4 模型仍显式关闭思考模式
+    expect(capturedBody?.stream).toBe(true);
+    expect(capturedBody?.model).toBe('deepseek-v4-flash');
+    expect((capturedBody as { thinking?: { type: string } } | undefined)?.thinking).toEqual({
+      type: 'disabled',
+    });
+  });
+
+  it('treats an empty stream as a retryable failure', async () => {
+    const provider = makeProvider(
+      async () =>
+        new Response('data: [DONE]\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+
+    await expect(async () => {
+      for await (const _chunk of provider.stream({ content: 'hi' }, {})) {
+        // 无内容时不应产出任何块
+      }
+    }).rejects.toMatchObject({ code: 'AI_UNAVAILABLE', retryable: true });
+  });
+
+  it('classifies non-OK status before streaming starts', async () => {
+    const provider = makeProvider(async () => jsonResponse(401, { error: 'invalid key' }));
+
+    await expect(async () => {
+      for await (const _chunk of provider.stream({ content: 'hi' }, {})) {
+        // 不应有任何产出
+      }
+    }).rejects.toMatchObject({ code: 'AI_INVALID_REQUEST', retryable: false });
+  });
+});
+
 describe('createDefaultAiProvider factory', () => {
   it('uses DeepSeek when a key is configured', () => {
     expect(createDefaultAiProvider('sk-abc')).toBeInstanceOf(DeepSeekProvider);

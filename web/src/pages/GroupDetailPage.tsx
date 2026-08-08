@@ -4,14 +4,15 @@
  * 【交互】
  * - 左侧：群组信息（成员管理、机器人管理、离开群组）；
  * - 左侧（创建者）：群组设置（名称/响应策略/每轮回复上限，保存调 PATCH）；
- * - 右侧：群聊窗口（人类/机器人发言，发送消息触发机器人回复）；
+ * - 右侧：群聊窗口（人类/机器人发言，发送消息走 SSE 流式接口——
+ *   每个机器人依次以 bot_start/bot_delta/bot_done 逐块渲染回复）；
  * - 成员可离开群组；创建者可添加/移除成员与机器人。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
-import { api, ApiError } from '../api/client.js';
-import type { Bot, Group, GroupMessage, SendGroupMessageResult } from '../api/types.js';
+import { api, ApiError, apiStream } from '../api/client.js';
+import type { Bot, Group, GroupMessage } from '../api/types.js';
 import { useAuth } from '../auth/AuthContext.js';
 import MentionText from '../components/MentionText.js';
 
@@ -51,6 +52,13 @@ export default function GroupDetailPage() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  // 当前正在流式回复的机器人（一次只有一个）：messageId 对应后端 PENDING 消息，
+  // content 累积增量文本，前端渲染「打字中」气泡
+  const [streamingBot, setStreamingBot] = useState<{
+    messageId: string;
+    botName: string;
+    content: string;
+  } | null>(null);
   // 添加成员：按用户名（全局唯一、大小写敏感）精确匹配
   const [addUsername, setAddUsername] = useState('');
   const [addBotId, setAddBotId] = useState('');
@@ -174,6 +182,13 @@ export default function GroupDetailPage() {
     prevFirstId.current = firstId;
   }, [messages]);
 
+  // 流式增量到达时持续滚动到底部，保持「最新回复内容可见」
+  useEffect(() => {
+    if (streamingBot !== null) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [streamingBot]);
+
   /**
    * 机器人 id → 名称映射（兜底用）
    *
@@ -201,16 +216,49 @@ export default function GroupDetailPage() {
     const requestId = requestIdRef.current ?? crypto.randomUUID();
     requestIdRef.current = requestId;
     try {
-      const result = await api<SendGroupMessageResult>(`/groups/${id}/messages`, {
-        method: 'POST',
-        body: { content: input.trim(), clientRequestId: requestId },
-      });
-      setMessages((prev) => [...prev, result.userMessage, ...result.botMessages]);
+      // SSE 流式发送：user_message 追加人类消息；bot_start 创建「打字中」气泡，
+      // bot_delta 增量渲染，bot_done 固化最终消息并切换到下一个机器人
+      await apiStream(
+        `/groups/${id}/messages`,
+        { content: input.trim(), clientRequestId: requestId },
+        {
+          user_message: (data) => {
+            const message = (data as { message: GroupMessage }).message;
+            setMessages((prev) => [...prev, message]);
+          },
+          bot_start: (data) => {
+            const message = (data as { message: GroupMessage }).message;
+            setStreamingBot({
+              messageId: message.id,
+              botName: message.senderName ?? botNameById(message.botId) ?? '机器人',
+              content: '',
+            });
+          },
+          bot_delta: (data) => {
+            const { delta } = data as { messageId: string; delta: string };
+            setStreamingBot((prev) => (prev ? { ...prev, content: prev.content + delta } : prev));
+          },
+          bot_done: (data) => {
+            const message = (data as { message: GroupMessage }).message;
+            setMessages((prev) => [...prev, message]);
+            setStreamingBot(null);
+          },
+          round_done: () => {
+            // 本轮全部机器人回复完成：无需额外处理（sending 由 finally 复位）
+          },
+          error: (data) => {
+            const err = (data as { error?: { message?: string } }).error;
+            setError(err?.message ?? '发送失败');
+            setStreamingBot(null);
+          },
+        },
+      );
       setInput('');
       requestIdRef.current = null;
     } catch (err) {
       // 保留幂等键：用户重试同一条消息时不会产生重复消息
       setError(err instanceof ApiError ? err.message : '发送失败');
+      setStreamingBot(null);
     } finally {
       setSending(false);
     }
@@ -398,6 +446,21 @@ export default function GroupDetailPage() {
                 </div>
               );
             })}
+            {/* 流式进行中的机器人气泡：增量文本 + 闪烁光标 */}
+            {streamingBot !== null && (
+              <div className="message-row bot">
+                <div className="avatar-sm bot">
+                  {streamingBot.botName.slice(0, 1).toUpperCase()}
+                </div>
+                <div className="message-content">
+                  <div className="message-author">{streamingBot.botName}</div>
+                  <div className="bubble bot streaming">
+                    <MentionText text={streamingBot.content} />
+                    <span className="streaming-cursor">▍</span>
+                  </div>
+                </div>
+              </div>
+            )}
             <div ref={bottomRef} />
           </div>
         </div>

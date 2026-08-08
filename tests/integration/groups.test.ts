@@ -25,7 +25,7 @@ import type {
   AiGenerateResult,
   AiProvider,
 } from '../../src/services/ai/types.js';
-import { auth, registerUser } from '../helpers.js';
+import { auth, parseSse, registerUser } from '../helpers.js';
 
 const app = createApp();
 // 故障应用：AI 必然失败，用于验证「保证机器人回复」的兜底逻辑
@@ -653,5 +653,76 @@ describe('groups API', () => {
       .set(auth(token));
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('INVALID_CURSOR');
+  });
+
+  it('streams bot replies via SSE (?stream=true)', async () => {
+    const { token } = await registerUser(app, 'gstream');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, {
+      name: '流式群',
+      botIds: [botId!],
+      responseMode: 'ALL_BOTS',
+    });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(app)
+      .post(`/api/groups/${groupId}/messages?stream=true`)
+      .set(auth(token))
+      .send({ content: '大家好' });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+
+    const events = parseSse(res.text);
+    const names = events.map((e) => e.event);
+    // 事件顺序：user_message → bot_start → bot_delta… → bot_done → round_done
+    expect(names[0]).toBe('user_message');
+    expect(names).toContain('bot_start');
+    expect(names).toContain('bot_delta');
+    expect(names).toContain('bot_done');
+    expect(names[names.length - 1]).toBe('round_done');
+
+    const doneEvent = events.find((e) => e.event === 'bot_done');
+    expect(doneEvent?.data).toMatchObject({
+      message: { senderType: 'BOT', status: 'SENT' },
+    });
+    // bot_start 的 PENDING 占位消息带稳定 id，与 bot_done 最终消息一致
+    const startEvent = events.find((e) => e.event === 'bot_start');
+    expect((startEvent?.data as { message: { id: string } }).message.id).toBe(
+      (doneEvent?.data as { message: { id: string } }).message.id,
+    );
+
+    // 数据库：人类消息 + 机器人回复均落库为 SENT
+    const rows = await prisma.groupMessage.findMany({
+      where: { groupId },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ senderType: 'HUMAN', status: 'SENT' });
+    expect(rows[1]).toMatchObject({ senderType: 'BOT', status: 'SENT' });
+  });
+
+  it('streams fallback replies when AI keeps failing (guaranteed reply)', async () => {
+    const { token } = await registerUser(failingApp, 'gstreamfail');
+    const [botId] = await getBotIds();
+    const created = await request(failingApp)
+      .post('/api/groups')
+      .set(auth(token))
+      .send({ name: '兜底群', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(failingApp)
+      .post(`/api/groups/${groupId}/messages?stream=true`)
+      .set(auth(token))
+      .send({ content: 'hi' });
+
+    const events = parseSse(res.text);
+    const doneEvent = events.find((e) => e.event === 'bot_done');
+    expect(doneEvent).toBeDefined();
+    expect(doneEvent?.data).toMatchObject({ message: { status: 'SENT' } });
+    // 兜底文案保证「人类消息后必有机器人回复」
+    expect((doneEvent?.data as { message: { content: string } }).message.content).toContain(
+      '我暂时无法回答',
+    );
   });
 });

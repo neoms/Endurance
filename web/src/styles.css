@@ -817,6 +817,25 @@ button:disabled {
   border: 1px solid #fecaca;
 }
 
+/* 流式「打字中」气泡：与普通机器人气泡同底色，仅追加闪烁光标 */
+.bubble.streaming {
+  min-height: 38px;
+}
+
+/* 流式光标：持续闪烁，提示内容仍在生成 */
+.streaming-cursor {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--muted);
+  animation: streaming-blink 0.9s steps(1) infinite;
+}
+
+@keyframes streaming-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
 /* ========== @提及高亮 ========== */
 .mention {
   color: var(--primary);

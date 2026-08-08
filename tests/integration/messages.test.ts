@@ -26,7 +26,7 @@ import type {
   AiGenerateResult,
   AiProvider,
 } from '../../src/services/ai/types.js';
-import { auth, createConversation, registerUser } from '../helpers.js';
+import { auth, createConversation, parseSse, registerUser } from '../helpers.js';
 
 // 正常应用（AI 成功）与故障应用（AI 必然失败，用于失败一致性测试）
 const app = createApp();
@@ -493,5 +493,78 @@ describe('messages API', () => {
       .post(`/api/messages/${sent.body.userMessage.id}/retry`)
       .set(auth(userB.token));
     expect(res.status).toBe(404);
+  });
+
+  it('streams the AI reply via SSE (?stream=true)', async () => {
+    const { token } = await registerUser(app, 'msgstream');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    const res = await request(app)
+      .post(`/api/conversations/${id}/messages?stream=true`)
+      .set(auth(token))
+      .send({ content: '你好，流式' });
+
+    // SSE：HTTP 200 + text/event-stream
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+
+    const events = parseSse(res.text);
+    const names = events.map((e) => e.event);
+    // 事件顺序：user_message 先到，ai_delta 增量，ai_done 收尾
+    expect(names[0]).toBe('user_message');
+    expect(names).toContain('ai_delta');
+    expect(names[names.length - 1]).toBe('ai_done');
+
+    const userEvent = events.find((e) => e.event === 'user_message');
+    expect(userEvent?.data).toMatchObject({
+      message: { senderType: 'HUMAN', status: 'SENT' },
+    });
+    const doneEvent = events.find((e) => e.event === 'ai_done');
+    expect(doneEvent?.data).toMatchObject({
+      message: { senderType: 'BOT', status: 'SENT' },
+    });
+    // 增量拼接结果必须与最终落库的完整回复一致
+    const joined = events
+      .filter((e) => e.event === 'ai_delta')
+      .map((e) => (e.data as { delta: string }).delta)
+      .join('');
+    expect(joined).toBe((doneEvent?.data as { message: { content: string } }).message.content);
+
+    // 数据库落库：人类消息 + AI 回复均为 SENT
+    const rows = await prisma.message.findMany({
+      where: { conversationId: id },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ senderType: 'HUMAN', status: 'SENT' });
+    expect(rows[1]).toMatchObject({ senderType: 'BOT', status: 'SENT' });
+  });
+
+  it('emits ai_error and persists FAILED when AI keeps failing', async () => {
+    const { token } = await registerUser(failingApp, 'msgstreamfail');
+    const conv = await createConversation(failingApp, token);
+    const id = conv.body.conversation.id as string;
+
+    const res = await request(failingApp)
+      .post(`/api/conversations/${id}/messages?stream=true`)
+      .set(auth(token))
+      .send({ content: 'hi' });
+
+    expect(res.status).toBe(200);
+    const events = parseSse(res.text);
+    const errEvent = events.find((e) => e.event === 'ai_error');
+    expect(errEvent).toBeDefined();
+    expect(errEvent?.data).toMatchObject({
+      message: { senderType: 'BOT', status: 'FAILED' },
+    });
+    // 用户消息仍保留（数据一致性：AI 失败不影响用户输入）
+    const rows = await prisma.message.findMany({
+      where: { conversationId: id },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ senderType: 'HUMAN', status: 'SENT' });
+    expect(rows[1]).toMatchObject({ senderType: 'BOT', status: 'FAILED' });
   });
 });

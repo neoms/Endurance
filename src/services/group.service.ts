@@ -818,6 +818,230 @@ export async function sendGroupMessage(
 }
 
 /**
+ * 流式发送群组消息的事件回调（由路由层翻译为 SSE 帧）
+ *
+ * @property userMessage 人类消息已落库
+ * @property botStart    某个机器人开始回复（PENDING 占位，前端据此显示打字气泡）
+ * @property botDelta    某个机器人回复的增量文本
+ * @property botDone     某个机器人回复已完成（SENT；失败时内容为兜底文案）
+ * @property roundDone   本轮全部机器人回复完成（前端据此关闭发送中状态）
+ */
+export interface GroupMessageStreamEvents {
+  userMessage?: (message: GroupMessageOutput) => void;
+  botStart?: (message: GroupMessageOutput) => void;
+  botDelta?: (messageId: string, delta: string) => void;
+  botDone?: (message: GroupMessageOutput) => void;
+  roundDone?: () => void;
+}
+
+/**
+ * 流式发送群组消息（人类消息落库 + 各机器人回复流式生成）
+ *
+ * @param aiService   AI 服务（流式重试/空闲超时）
+ * @param userId      当前用户 id（须是群组成员）
+ * @param groupId     目标群组 id
+ * @param input       { content, clientRequestId? }
+ * @param events      流式事件回调（userMessage/botStart/botDelta/botDone/roundDone）
+ * @param clientSignal 可选：客户端断连信号（断连时中止 AI 调用）
+ * @returns Promise<void> 本轮结束后 resolve
+ * @throws AppError(404 / 409 NO_ACTIVE_BOT / 400 MENTION_NOT_FOUND)
+ *         在第一个事件发出之前抛出，路由层转为 SSE error 事件
+ *
+ * 与 sendGroupMessage 的关系（保证回复契约不变）：
+ * - 选择机器人、@提及规则、防循环上限、兜底文案逻辑完全一致；
+ * - 差异只在传输层：每个机器人的回复先 PENDING 占位 → botStart →
+ *   逐块 botDelta → 完成后更新 SENT 并 botDone；
+ * - 生成失败仍以兜底文案落库（保证人类消息后必有回复），不中断后续机器人；
+ * - 幂等命中回放首次轮次（userMessage + 各 botDone），不重复生成。
+ */
+export async function streamSendGroupMessage(
+  aiService: AiService,
+  userId: string,
+  groupId: string,
+  input: { content: string; clientRequestId?: string },
+  events: GroupMessageStreamEvents = {},
+  clientSignal?: AbortSignal,
+): Promise<void> {
+  // ACL：仅群组成员可发消息
+  await assertGroupAccess(userId, groupId);
+
+  await groupLocks(groupId, async () => {
+    // 锁内读取群组配置与机器人（保证与轮次执行一致）
+    const group = await prisma.chatGroup.findUnique({
+      where: { id: groupId },
+      include: {
+        bots: { include: { bot: true } },
+        members: { include: { user: { select: { username: true, displayName: true } } } },
+      },
+    });
+    if (!group) {
+      throw new AppError(404, 'GROUP_NOT_FOUND', 'Group not found');
+    }
+    const content = input.content.trim();
+    const bots = group.bots.map((gb) => gb.bot).filter((bot) => bot.isActive);
+
+    // 防御：群组内没有启用状态的机器人时，拒绝发送而不是静默返回零回复
+    if (bots.length === 0) {
+      logger.warn({ groupId, userId }, 'group: stream send blocked, no active bots');
+      throw new AppError(409, 'NO_ACTIVE_BOT', 'Group has no active bots, cannot reply');
+    }
+
+    // @提及解析与校验：名称必须存在于当前群组（与 sendGroupMessage 完全一致）
+    const mentionResult = resolveMentions(
+      content,
+      group.bots.map((gb) => gb.bot),
+      group.members.map((m) => m.user),
+    );
+    if (mentionResult.unresolved.length > 0) {
+      logger.warn(
+        { groupId, userId, unresolved: mentionResult.unresolved },
+        'group: stream send blocked, unresolved mentions',
+      );
+      throw new AppError(
+        400,
+        'MENTION_NOT_FOUND',
+        `Cannot mention: ${mentionResult.unresolved.join(', ')}`,
+        { mentions: mentionResult.unresolved },
+      );
+    }
+
+    // 幂等：命中时回放首次轮次（用户消息 + 各机器人完整回复），不重复生成
+    if (input.clientRequestId) {
+      const existing = await prisma.groupMessage.findUnique({
+        where: {
+          groupId_clientRequestId: {
+            groupId,
+            clientRequestId: input.clientRequestId,
+          },
+        },
+        include: GROUP_MESSAGE_SENDER_INCLUDE,
+      });
+      if (existing) {
+        const existingBots = await prisma.groupMessage.findMany({
+          where: { groupId, roundId: existing.roundId, senderType: SenderType.BOT },
+          orderBy: { createdAt: 'asc' },
+          include: GROUP_MESSAGE_SENDER_INCLUDE,
+        });
+        logger.debug(
+          { groupId, clientRequestId: input.clientRequestId },
+          'group: stream idempotent hit',
+        );
+        events.userMessage?.(toGroupMessageOutput(existing));
+        for (const botMessage of existingBots) {
+          events.botDone?.(toGroupMessageOutput(botMessage));
+        }
+        events.roundDone?.();
+        return;
+      }
+    }
+
+    // 生成唯一轮次 id：本轮所有机器人回复共享，作为防循环的分组依据
+    const roundId = randomUUID();
+    const userMessage = await prisma.groupMessage.create({
+      data: {
+        groupId,
+        roundId,
+        senderType: SenderType.HUMAN,
+        userId,
+        content,
+        status: MessageStatus.SENT,
+        clientRequestId: input.clientRequestId,
+      },
+    });
+    const userMessageWithSender = await prisma.groupMessage.findUnique({
+      where: { id: userMessage.id },
+      include: GROUP_MESSAGE_SENDER_INCLUDE,
+    });
+
+    // 选择本轮回复机器人（@提及优先，其次按响应策略；防循环上限不变）
+    const mentionedActiveBots = mentionResult.mentionedBots.filter((bot) => bot.isActive);
+    const hasMentions =
+      mentionResult.mentionedBots.length > 0 || mentionResult.mentionedMembers.length > 0;
+    const selectedBots = hasMentions
+      ? mentionedActiveBots
+      : selectBotsForRound(bots, group.responseMode, content, group.maxConsecutiveBotReplies);
+    const history = await buildGroupHistory(groupId, userMessage.id);
+    // 实际发言成员的用户名（Mock AI 回显「用户名说：」；ACL 保证发送者必然是成员）
+    const senderName = group.members.find((m) => m.userId === userId)?.user.username ?? '用户';
+
+    // 先通知前端人类消息已落库，再逐个机器人流式推送
+    events.userMessage?.(toGroupMessageOutput(userMessageWithSender!));
+
+    for (const bot of selectedBots) {
+      // 每个机器人：先 PENDING 落库占位（拿到稳定消息 id），前端显示打字气泡
+      const pending = await prisma.groupMessage.create({
+        data: {
+          groupId,
+          roundId,
+          senderType: SenderType.BOT,
+          botId: bot.id,
+          content: '',
+          status: MessageStatus.PENDING,
+        },
+      });
+      const pendingWithSender = await prisma.groupMessage.findUnique({
+        where: { id: pending.id },
+        include: GROUP_MESSAGE_SENDER_INCLUDE,
+      });
+      events.botStart?.(toGroupMessageOutput(pendingWithSender!));
+
+      // 流式生成：逐块累积并回调；失败时以兜底文案落库（保证必有回复）
+      let partial = '';
+      try {
+        for await (const delta of aiService.streamWithRetry(
+          {
+            content,
+            botName: bot.name,
+            personality: bot.personality,
+            history,
+            userName: senderName,
+          },
+          { clientSignal },
+        )) {
+          partial += delta;
+          events.botDelta?.(pending.id, delta);
+        }
+        const saved = await prisma.groupMessage.update({
+          where: { id: pending.id },
+          data: { content: partial, status: MessageStatus.SENT },
+        });
+        const savedWithSender = await prisma.groupMessage.findUnique({
+          where: { id: saved.id },
+          include: GROUP_MESSAGE_SENDER_INCLUDE,
+        });
+        logger.debug(
+          { groupId, roundId, botId: bot.id, chars: saved.content.length },
+          'group: stream bot reply saved',
+        );
+        events.botDone?.(toGroupMessageOutput(savedWithSender!));
+      } catch (err) {
+        // 保证回复：生成失败/流中断时以兜底文案落库（不中断本轮其他机器人）。
+        // 与 sendGroupMessage 的兜底行为保持一致；已产出的部分内容被兜底文案替换。
+        logger.error(
+          { groupId, roundId, botId: bot.id, err },
+          'group: stream bot reply failed, using fallback',
+        );
+        const fallback = await prisma.groupMessage.update({
+          where: { id: pending.id },
+          data: { content: FALLBACK_REPLY, status: MessageStatus.SENT },
+        });
+        const fallbackWithSender = await prisma.groupMessage.findUnique({
+          where: { id: fallback.id },
+          include: GROUP_MESSAGE_SENDER_INCLUDE,
+        });
+        events.botDone?.(toGroupMessageOutput(fallbackWithSender!));
+      }
+    }
+
+    logger.info(
+      { groupId, roundId, userId, mode: group.responseMode, botReplies: selectedBots.length },
+      'group: stream round completed',
+    );
+    events.roundDone?.();
+  });
+}
+
+/**
  * 群组历史消息（游标分页，按时间升序）
  *
  * @param userId  当前用户 id

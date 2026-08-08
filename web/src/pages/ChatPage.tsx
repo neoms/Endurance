@@ -3,15 +3,16 @@
  *
  * 【交互】
  * - 首屏加载最近 50 条历史消息，顶部「加载更早」按钮用 before 游标翻页取更早消息；
- * - 发送消息：后端同步返回用户消息 + AI 回复，直接追加到列表；
+ * - 发送消息：走 SSE 流式接口（?stream=true），用户消息先落库返回，
+ *   AI 回复以 ai_delta 增量逐块渲染（打字机效果），完成后以 ai_done 固化；
  * - 发送携带 clientRequestId 幂等键：失败重试同一条消息不会产生重复消息；
  * - AI 失败（status=FAILED）展示错误标记与「重试」按钮（调用 retry 接口）。
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useParams } from 'react-router-dom';
 
-import { api, ApiError } from '../api/client.js';
-import type { Conversation, Message, SendMessageResult } from '../api/types.js';
+import { api, ApiError, apiStream } from '../api/client.js';
+import type { Conversation, Message } from '../api/types.js';
 import { useAuth } from '../auth/AuthContext.js';
 import MentionText from '../components/MentionText.js';
 
@@ -25,6 +26,8 @@ export default function ChatPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  // 流式进行中的 AI 回复文本：非 null 时在消息列表尾部渲染「打字中」气泡
+  const [streamingText, setStreamingText] = useState<string | null>(null);
   const [error, setError] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   // 当前待发送消息的幂等键：发送失败后保留，重试同一条消息时后端去重；
@@ -88,6 +91,13 @@ export default function ChatPage() {
     prevFirstId.current = firstId;
   }, [messages]);
 
+  // 流式增量到达时持续滚动到底部，保持「最新内容可见」
+  useEffect(() => {
+    if (streamingText !== null) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [streamingText]);
+
   /**
    * 发送消息：追加用户消息与 AI 回复
    *
@@ -98,24 +108,51 @@ export default function ChatPage() {
     if (!id || !input.trim() || sending) return;
     setSending(true);
     setError('');
+    // 立即显示空的「打字中」气泡；后续 ai_delta 逐块填充
+    setStreamingText('');
     // 失败重试复用同一幂等键（后端返回首次结果）；首次发送生成新键
     const requestId = requestIdRef.current ?? crypto.randomUUID();
     requestIdRef.current = requestId;
     try {
-      const result = await api<SendMessageResult>(`/conversations/${id}/messages`, {
-        method: 'POST',
-        body: { content: input.trim(), clientRequestId: requestId },
-      });
-      setMessages((prev) => [
-        ...prev,
-        result.userMessage,
-        ...(result.aiMessage ? [result.aiMessage] : []),
-      ]);
+      // SSE 流式发送：user_message 追加用户气泡，ai_delta 增量渲染，
+      // ai_done/ai_error 把最终消息固化进列表并关闭「打字中」气泡
+      await apiStream(
+        `/conversations/${id}/messages`,
+        { content: input.trim(), clientRequestId: requestId },
+        {
+          user_message: (data) => {
+            const message = (data as { message: Message }).message;
+            setMessages((prev) => [...prev, message]);
+          },
+          ai_delta: (data) => {
+            const delta = (data as { delta: string }).delta;
+            setStreamingText((prev) => (prev ?? '') + delta);
+          },
+          ai_done: (data) => {
+            const message = (data as { message: Message }).message;
+            setMessages((prev) => [...prev, message]);
+            setStreamingText(null);
+          },
+          ai_error: (data) => {
+            // 失败占位消息（FAILED）：与普通消息一样展示错误与重试按钮
+            const message = (data as { message: Message }).message;
+            setMessages((prev) => [...prev, message]);
+            setStreamingText(null);
+          },
+          error: (data) => {
+            // 前置校验失败（如对话不存在）：展示错误并关闭「打字中」气泡
+            const err = (data as { error?: { message?: string } }).error;
+            setError(err?.message ?? '发送失败');
+            setStreamingText(null);
+          },
+        },
+      );
       setInput('');
       requestIdRef.current = null;
     } catch (err) {
       // 保留幂等键：用户重试同一条消息时不会产生重复消息
       setError(err instanceof ApiError ? err.message : '发送失败');
+      setStreamingText(null);
     } finally {
       setSending(false);
     }
@@ -190,6 +227,19 @@ export default function ChatPage() {
               )}
             </div>
           ))}
+          {/* 流式进行中的 AI 气泡：增量文本 + 闪烁光标 */}
+          {streamingText !== null && (
+            <div className="message-row bot">
+              <div className="avatar-sm bot">AI</div>
+              <div className="message-content">
+                <div className="message-author">AI 助手</div>
+                <div className="bubble bot streaming">
+                  <MentionText text={streamingText} />
+                  <span className="streaming-cursor">▍</span>
+                </div>
+              </div>
+            </div>
+          )}
           <div ref={bottomRef} />
         </div>
       </div>
