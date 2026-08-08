@@ -22,6 +22,13 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('技术机器人');
     expect(prompt).toContain('严谨、专业，喜欢讲原理');
     expect(prompt).toContain('不要自称是 AI 助手');
+    // 防回归：包装层用中性「角色」而非「机器人」——
+    // 预设里有人类角色（库珀/布兰德等），写死「你是机器人」会让人物以机械口吻回答
+    expect(prompt).toContain('群聊中的角色');
+    expect(prompt).not.toContain('你是群组机器人');
+    // 群聊沉浸规则：第一人称扮演、口语化对话、不替别人发言
+    expect(prompt).toContain('不要替其他角色或用户发言');
+    expect(prompt).toContain('不使用 emoji 或网络流行语');
   });
 
   it('falls back to name-only prompt when personality is missing', () => {

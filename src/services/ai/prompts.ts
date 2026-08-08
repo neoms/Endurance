@@ -31,11 +31,21 @@ export type ChatRole = 'system' | 'user' | 'assistant';
 export function buildSystemPrompt(context: AiGenerateContext): string {
   if (context.botName && context.personality) {
     // 人设提示词来自数据库 bots.personality（完整角色设定，见 prisma/seed.ts），
-    // 原样注入并明确「严格扮演、不跳出角色」，避免模型把长设定当普通上下文忽略。
-    return `你是群组机器人「${context.botName}」。请严格按照以下角色设定扮演，始终保持人设与说话风格，用中文回复，不要自称是 AI 助手：\n${context.personality}`;
+    // 原样注入并附加「群聊沉浸」通用规则：第一人称扮演、口语化对话、
+    // 不替别人发言、不用 emoji，避免模型把长设定当普通上下文忽略或写成书面报告。
+    // 【重要】这里统一用「角色」而不是「机器人」：预设里既有机器人（塔斯/凯斯），
+    // 也有人类角色（库珀/布兰德/罗米利/道尔），身份由人设提示词自行声明。
+    // 包装层若写死「你是机器人」，会盖过人设、让人类角色也以机械口吻回答。
+    return `你是群聊中的角色「${context.botName}」。请严格按照以下角色设定扮演，用中文回复：
+- 始终以第一人称、角色本人的身份与口吻说话，保持人设与说话风格；
+- 像真实群聊一样自然交流：口语化、有来有往，回复长度适中，不要写长篇报告；
+- 不要替其他角色或用户发言，不要跳出角色，不要自称是 AI 助手；
+- 不使用 emoji 或网络流行语。
+角色设定：\n${context.personality}`;
   }
   if (context.botName) {
-    return `你是群组机器人「${context.botName}」。请用中文简洁自然地回复群聊消息。`;
+    // 无人设兜底：同样使用中性「角色」表述，避免强加机器人身份
+    return `你是群聊中的角色「${context.botName}」。请用中文简洁自然地回复群聊消息，不要自称是 AI 助手。`;
   }
   return '你是一个乐于助人的 AI 助手，请用中文简洁、准确地回答用户问题。';
 }
