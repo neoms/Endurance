@@ -152,6 +152,18 @@ npm start
 
 访问 `http://localhost:3000`：前端 SPA 与 API 由同一服务托管。
 
+### Docker 一键部署（推荐，消除环境差异）
+
+```bash
+cp .env.example .env          # 可选：填入 DEEPSEEK_API_KEY 启用真实 AI
+docker compose up -d --build  # 构建并启动（首次约 3-10 分钟）
+docker compose logs -f        # 查看日志
+```
+
+访问 `http://localhost:3000`（前端 + API）与 `http://localhost:3000/api-docs`（接口文档）。
+数据持久化在 Docker 命名卷 `endurance-data`，重启不丢失；
+只需 Docker，无需手动安装 Node/依赖。详见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+
 ## 测试账号
 
 | 用户名  | 密码          | 说明                                     |

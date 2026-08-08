@@ -1,0 +1,48 @@
+# ============================================================================
+# Endurance Chat — 一键部署（Docker Compose）
+#
+# 用法：
+#   cp .env.example .env          # 按需修改（JWT_SECRET、DEEPSEEK_API_KEY 等）
+#   docker compose up -d --build  # 构建并后台启动
+#   docker compose logs -f        # 查看日志（生产 stdout）
+#   docker compose down           # 停止（数据保留在 endurance-data 卷）
+#
+# 访问：http://localhost:3000（前端 SPA + API）、http://localhost:3000/api-docs（接口文档）
+# 数据：SQLite 文件持久化在命名卷 endurance-data（重启/重建容器不丢失）
+# ============================================================================
+services:
+  endurance:
+    build: .
+    image: endurance-chat:latest
+    container_name: endurance-chat
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # SQLite 文件写入挂载卷（docker-compose 命名卷 → /data）
+      DATABASE_URL: file:/data/app.db
+      # 【重要】生产必须替换为强随机值：openssl rand -hex 32
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-do-not-use-in-production}
+      # 可选：配置后接入真实 DeepSeek，留空回退 Mock
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      # 日志与限流
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      REQUEST_LOG_SAMPLE_RATE: ${REQUEST_LOG_SAMPLE_RATE:-1}
+      SLOW_REQUEST_THRESHOLD_MS: ${SLOW_REQUEST_THRESHOLD_MS:-2000}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-30}
+    volumes:
+      - endurance-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/api/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  endurance-data:

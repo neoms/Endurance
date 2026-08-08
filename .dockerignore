@@ -1,0 +1,37 @@
+# 依赖与构建产物（由多阶段构建重新生成）
+node_modules
+web/node_modules
+dist
+web/dist
+coverage
+
+# 本地数据与日志（不应进入镜像）
+*.db
+*.db-journal
+logs
+*.log
+
+# 本地环境配置（构建/运行均使用环境变量注入）
+.env
+.env.*
+!.env.example
+
+# 版本控制与文档（运行时镜像不需要）
+.git
+.gitignore
+docs
+tests
+plan
+scripts
+README.md
+AGENTS.md
+Dockerfile
+docker-compose.yml
+.dockerignore
+.nvmrc
+.node-version
+.editorconfig
+.prettierrc.json
+.prettierignore
+eslint.config.js
+vitest.config.ts

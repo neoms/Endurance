@@ -134,6 +134,50 @@ npm start           # node dist/server.js，同一端口托管 API + 前端 SPA
 
 ## 生产部署到公网
 
+### Docker 一键部署（推荐，消除环境差异）
+
+仓库根目录提供 `Dockerfile`（多阶段构建）与 `docker-compose.yml`（一键编排），
+本地/服务器只需安装 Docker 即可运行，无需手动安装 Node、处理依赖与构建：
+
+```bash
+# 1. 准备环境变量（可选：填入 DEEPSEEK_API_KEY 启用真实 AI；JWT_SECRET 建议替换）
+cp .env.example .env
+
+# 2. 构建镜像并后台启动（首次构建需拉取 node:24.13.0-alpine，视网络约 3-10 分钟）
+docker compose up -d --build
+
+# 3. 查看启动日志（迁移/种子/启动过程）
+docker compose logs -f
+```
+
+访问 `http://localhost:3000`（前端 SPA + API）与 `http://localhost:3000/api-docs`（接口文档）。
+
+**数据持久化**：SQLite 文件写入命名卷 `endurance-data`（挂载到容器 `/data`）——
+重启、重建、删除容器数据都不丢失；彻底清理用 `docker compose down -v`（会删除数据卷）。
+
+**环境变量**：`docker-compose.yml` 从当前 shell / `.env` 读取（如 `DEEPSEEK_API_KEY`、
+`JWT_SECRET`、`RATE_LIMIT_MAX` 等，均有默认值）；`NODE_ENV`、`DATABASE_URL` 已固定为
+生产配置（stdout 日志 + 卷内数据库），无需手动改。
+
+**常用命令**：
+
+```bash
+docker compose up -d --build   # 构建并启动
+docker compose logs -f         # 查看日志
+docker compose restart         # 重启
+docker compose down            # 停止（保留数据）
+docker compose down -v         # 停止并删除数据卷（慎用）
+```
+
+**镜像拉取失败的排查**：国内网络拉取 `node:24.13.0-alpine` 失败时，
+可切换 Docker 镜像源（daemon 配置 `registry-mirrors`）或手动 `docker pull` 基础镜像后重试；
+也可将 `Dockerfile` 的 `FROM node:24.13.0-alpine` 换为本机可访问的 node:24 镜像。
+
+**镜像结构说明**：多阶段构建——阶段 1 安装全量依赖（含 prisma/tsx）并构建前后端；
+阶段 2 只保留运行文件与全量 `node_modules`（运行时需要 prisma CLI 执行 `db:deploy` /
+`db:seed`），以镜像体积换取部署可靠性；启动命令自动执行「迁移 → 种子 → 启动」，
+`HEALTHCHECK` 每 30s 探活 `/api/health`。
+
 ### 平台选择
 
 推荐支持**持久磁盘**的 PaaS 平台：
