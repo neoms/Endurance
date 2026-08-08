@@ -1,27 +1,35 @@
 /**
- * 全局样式（参照 ChatGPT 网页版布局）
+ * 全局样式（《星际穿越》科幻主题，参照 ChatGPT 网页版布局）
  *
- * 【布局说明】
- * - 左侧固定边栏：新建对话、对话/群组切换、历史列表、底部用户区；
- * - 主区域：欢迎页（空状态）或聊天页（顶部标题 + 消息流 + 底部圆角输入框）；
- * - 窄屏（<768px）边栏收起为浮层，左上角按钮展开。
+ * 【主题说明】
+ * - 配色：深空黑（#05070d）+ 任务橙（#ff9e2c，永恒号标志色）+ 仪表青（#35d0e8）；
+ * - 氛围：静态星场背景 + 全局 CRT 扫描线 + 面板描边微光，模拟飞船控制台/HUD；
+ * - 布局：沿用原结构（左侧边栏 + 主区聊天），仅换肤不改动布局与交互。
  */
 
 :root {
-  color-scheme: light;
-  --primary: #10a37f;
-  --primary-dark: #0e8f6f;
-  --danger: #dc2626;
-  --bg: #ffffff;
-  --sidebar-bg: #f9f9f9;
-  --card: #ffffff;
-  --border: #e5e5e5;
-  --hover: #ececec;
-  --active: #e0e0e0;
-  --text: #0d0d0d;
-  --muted: #6b7280;
+  color-scheme: dark;
+  /* 主色：任务橙（主按钮 / 用户气泡 / 强调） */
+  --primary: #ff9e2c;
+  --primary-dark: #e07f0e;
+  /* 辅助色：仪表青（机器人 / 边框 / 激活态） */
+  --accent: #35d0e8;
+  --danger: #ff5c5c;
+  /* 背景与面板：深空黑 → 深蓝黑面板 */
+  --bg: #05070d;
+  --panel: #0a101c;
+  --card: #0c1422;
+  --sidebar-bg: #070b14;
+  --border: rgba(255, 158, 44, 0.18);
+  --border-cyan: rgba(53, 208, 232, 0.25);
+  --hover: rgba(255, 158, 44, 0.1);
+  --active: rgba(53, 208, 232, 0.14);
+  --text: #e8edf5;
+  --muted: #8ba0b8;
   --radius: 8px;
   --sidebar-width: 272px;
+  /* HUD 等宽字体：用于标题/标签，营造仪表读数感（中文自动回退系统字体） */
+  --font-hud: 'SFMono-Regular', 'Menlo', 'Consolas', 'Roboto Mono', 'Courier New', monospace;
 }
 
 * {
@@ -32,9 +40,36 @@ body {
   margin: 0;
   font-family:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  background: var(--bg);
+  /* 静态星场：多个极小白色光点（radial-gradient 模拟）+ 深空渐变压暗四周 */
+  background:
+    radial-gradient(1px 1px at 12% 22%, rgba(255, 255, 255, 0.7) 0, transparent 100%),
+    radial-gradient(1px 1px at 26% 64%, rgba(255, 255, 255, 0.45) 0, transparent 100%),
+    radial-gradient(1.5px 1.5px at 38% 14%, rgba(255, 222, 170, 0.6) 0, transparent 100%),
+    radial-gradient(1px 1px at 47% 82%, rgba(255, 255, 255, 0.5) 0, transparent 100%),
+    radial-gradient(1px 1px at 58% 34%, rgba(255, 255, 255, 0.4) 0, transparent 100%),
+    radial-gradient(1.5px 1.5px at 66% 70%, rgba(53, 208, 232, 0.5) 0, transparent 100%),
+    radial-gradient(1px 1px at 73% 18%, rgba(255, 255, 255, 0.55) 0, transparent 100%),
+    radial-gradient(1px 1px at 82% 54%, rgba(255, 255, 255, 0.45) 0, transparent 100%),
+    radial-gradient(1.5px 1.5px at 91% 30%, rgba(255, 222, 170, 0.5) 0, transparent 100%),
+    radial-gradient(1px 1px at 8% 86%, rgba(255, 255, 255, 0.4) 0, transparent 100%),
+    radial-gradient(ellipse 140% 90% at 50% -12%, #101b33 0%, #05070d 58%);
+  background-attachment: fixed;
   color: var(--text);
   font-size: 15px;
+}
+
+/* 全局 CRT 扫描线：极淡的横向细线，营造飞船屏幕质感（不拦截交互） */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(255, 255, 255, 0.018) 0 1px,
+    transparent 1px 3px
+  );
 }
 
 .center-screen {
@@ -104,6 +139,8 @@ body {
   font-size: 13px;
   cursor: pointer;
   text-align: center;
+  font-family: var(--font-hud);
+  letter-spacing: 0.08em;
 }
 
 .sidebar-tab.active {
@@ -127,6 +164,8 @@ body {
   font-size: 12px;
   font-weight: 600;
   color: var(--muted);
+  font-family: var(--font-hud);
+  letter-spacing: 0.1em;
 }
 
 .sidebar-filter-chips {
@@ -153,8 +192,9 @@ body {
 
 .filter-chip.active {
   background: var(--primary);
-  color: #fff;
+  color: #201204;
   border-color: var(--primary);
+  box-shadow: 0 0 10px rgba(255, 158, 44, 0.3);
 }
 
 .sidebar-list {
@@ -176,8 +216,9 @@ body {
 }
 
 .sidebar-item.active {
-  /* 激活色：品牌绿浅底 + 绿色标题，与 hover 灰明显区分 */
-  background: #e6f4ef;
+  /* 激活色：仪表青暗底 + 橙色标题，与 hover 区分 */
+  background: var(--active);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .sidebar-item.active .sidebar-item-title {
@@ -226,8 +267,9 @@ body {
 }
 
 .icon-btn:hover {
-  background: #d9d9d9;
-  color: var(--text);
+  background: var(--hover);
+  color: var(--primary);
+  box-shadow: 0 0 10px rgba(255, 158, 44, 0.25);
 }
 
 /* 三点下拉菜单 */
@@ -246,7 +288,9 @@ body {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 8px 28px rgba(0, 0, 0, 0.7);
   padding: 4px;
 }
 
@@ -272,7 +316,7 @@ body {
 }
 
 .sidebar-menu button.menu-danger:hover {
-  background: #fef2f2;
+  background: rgba(255, 92, 92, 0.12);
 }
 
 .sidebar-footer {
@@ -315,13 +359,17 @@ body {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 8px 28px rgba(0, 0, 0, 0.7);
   padding: 10px 12px;
 }
 
 .user-popover-label {
   font-size: 12px;
   color: var(--muted);
+  font-family: var(--font-hud);
+  letter-spacing: 0.1em;
 }
 
 .user-popover-name {
@@ -335,7 +383,7 @@ body {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
+  background: rgba(2, 4, 10, 0.72);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -354,13 +402,18 @@ body {
   /* 弹窗高度受视口约束：超高时内部滚动，绝不超出屏幕边界 */
   max-height: calc(100vh - 48px);
   overflow-y: auto;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.16);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 10px 44px rgba(0, 0, 0, 0.75),
+    0 0 30px rgba(255, 158, 44, 0.08);
 }
 
 .modal h4 {
   margin: 0 0 14px;
   font-size: 17px;
   font-weight: 700;
+  font-family: var(--font-hud);
+  letter-spacing: 0.06em;
 }
 
 .modal .field {
@@ -410,13 +463,13 @@ body {
 }
 
 .bot-card:hover {
-  border-color: var(--primary);
-  background: #f6fcfa;
+  border-color: var(--accent);
+  background: var(--hover);
 }
 
 .bot-card.selected {
   border-color: var(--primary);
-  background: #e6f4ef;
+  background: var(--active);
   box-shadow: 0 0 0 1px var(--primary);
 }
 
@@ -436,7 +489,7 @@ body {
 }
 
 .bot-card.selected .bot-card-personality {
-  color: var(--primary-dark);
+  color: var(--primary);
 }
 
 .avatar {
@@ -444,13 +497,14 @@ body {
   height: 30px;
   border-radius: 50%;
   background: var(--primary);
-  color: #fff;
+  color: #201204;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 13px;
   font-weight: 600;
   flex-shrink: 0;
+  box-shadow: 0 0 12px rgba(255, 158, 44, 0.35);
 }
 
 .sidebar-user {
@@ -464,6 +518,8 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-family: var(--font-hud);
+  letter-spacing: 0.05em;
 }
 
 .sidebar-error {
@@ -538,12 +594,17 @@ body {
   border: 1px solid var(--border);
   border-radius: 16px;
   padding: 28px;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.05);
+  box-shadow:
+    0 0 0 1px rgba(255, 158, 44, 0.08),
+    0 12px 48px rgba(0, 0, 0, 0.7),
+    0 0 34px rgba(255, 158, 44, 0.1);
 }
 
 .auth-card h2 {
   text-align: center;
   font-size: 22px;
+  font-family: var(--font-hud);
+  letter-spacing: 0.1em;
 }
 
 .auth-tabs {
@@ -557,14 +618,17 @@ body {
   padding: 8px;
   border-radius: var(--radius);
   border: none;
-  background: #eef0f3;
+  background: var(--panel);
   color: var(--text);
   cursor: pointer;
+  font-family: var(--font-hud);
+  letter-spacing: 0.1em;
 }
 
 .auth-tabs button.active {
   background: var(--primary);
-  color: #fff;
+  color: #201204;
+  box-shadow: 0 0 14px rgba(255, 158, 44, 0.4);
 }
 
 /* ========== 表单 ========== */
@@ -590,6 +654,8 @@ textarea {
   font-size: 14px;
   width: 100%;
   font-family: inherit;
+  background: var(--panel);
+  color: var(--text);
 }
 
 /* 自定义下拉框：隐藏浏览器原生外观，用 SVG 箭头替换，并加大右侧留白避免文字压箭头 */
@@ -597,7 +663,7 @@ select {
   appearance: none;
   -webkit-appearance: none;
   padding-right: 34px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23ff9e2c' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
   cursor: pointer;
@@ -606,7 +672,7 @@ select {
 input:focus,
 select:focus,
 textarea:focus {
-  outline: 2px solid rgba(16, 163, 127, 0.25);
+  outline: 2px solid rgba(255, 158, 44, 0.3);
   border-color: var(--primary);
 }
 
@@ -615,23 +681,28 @@ button {
   border: none;
   border-radius: var(--radius);
   background: var(--primary);
-  color: #fff;
+  color: #201204;
   font-size: 14px;
   cursor: pointer;
   font-family: inherit;
+  font-weight: 600;
 }
 
 button:hover {
   background: var(--primary-dark);
+  box-shadow: 0 0 14px rgba(255, 158, 44, 0.35);
 }
 
 button.secondary {
-  background: #eef0f3;
+  background: var(--panel);
   color: var(--text);
+  border: 1px solid var(--border-cyan);
+  font-weight: 500;
 }
 
 button.secondary:hover {
-  background: var(--hover);
+  background: var(--active);
+  box-shadow: 0 0 12px rgba(53, 208, 232, 0.2);
 }
 
 button.danger {
@@ -655,6 +726,7 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 16px;
+  box-shadow: 0 0 18px rgba(53, 208, 232, 0.04);
 }
 
 /* ========== 欢迎页（空状态） ========== */
@@ -672,41 +744,14 @@ button:disabled {
   font-size: 28px;
   font-weight: 700;
   margin: 8px 0;
+  font-family: var(--font-hud);
+  letter-spacing: 0.12em;
+  color: var(--primary);
 }
 
 .welcome-sub {
   color: var(--muted);
   font-size: 15px;
-}
-
-.suggestion-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(220px, 1fr));
-  gap: 12px;
-  margin-top: 36px;
-  max-width: 560px;
-  width: 100%;
-}
-
-.suggestion-card {
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 16px;
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1.5;
-  background: var(--card);
-  transition: background 0.15s;
-}
-
-.suggestion-card:hover {
-  background: var(--hover);
-}
-
-@media (max-width: 560px) {
-  .suggestion-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* ========== 聊天（主区） ========== */
@@ -720,6 +765,10 @@ button:disabled {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-family: var(--font-hud);
+  letter-spacing: 0.14em;
+  color: var(--primary);
+  background: linear-gradient(180deg, rgba(255, 158, 44, 0.05), transparent);
 }
 
 .chat-messages {
@@ -761,6 +810,8 @@ button:disabled {
   font-size: 12px;
   color: var(--muted);
   margin-bottom: 5px;
+  font-family: var(--font-hud);
+  letter-spacing: 0.06em;
 }
 
 .avatar-sm {
@@ -778,13 +829,15 @@ button:disabled {
 
 .avatar-sm.user {
   background: var(--primary);
-  color: #fff;
+  color: #201204;
+  box-shadow: 0 0 10px rgba(255, 158, 44, 0.3);
 }
 
 .avatar-sm.bot,
 .avatar-sm.other {
   background: var(--hover);
-  color: var(--muted);
+  color: var(--accent);
+  border: 1px solid var(--border-cyan);
 }
 
 .bubble {
@@ -800,21 +853,22 @@ button:disabled {
 
 .bubble.user {
   background: var(--primary);
-  color: #fff;
+  color: #201204;
   border-bottom-right-radius: 6px;
+  box-shadow: 0 0 16px rgba(255, 158, 44, 0.22);
 }
 
 .bubble.bot,
 .bubble.other {
-  background: #f4f4f5;
+  background: #0d1524;
   border: 1px solid var(--border);
   border-bottom-left-radius: 6px;
 }
 
 .bubble.failed {
   color: var(--danger);
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+  background: rgba(255, 92, 92, 0.08);
+  border: 1px solid rgba(255, 92, 92, 0.35);
 }
 
 /* 流式「打字中」气泡：与普通 NPC 气泡同底色，仅追加闪烁光标 */
@@ -844,7 +898,7 @@ button:disabled {
 
 /* 用户深绿气泡上的 @提及：使用浅绿黄，保证与深绿底色的对比度 */
 .bubble.user .mention {
-  color: #bbf7d0;
+  color: #ffd9a1;
 }
 
 .chat-input-wrap {
@@ -939,7 +993,9 @@ button:disabled {
   border-radius: 24px;
   padding: 8px 8px 8px 18px;
   background: var(--card);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+  box-shadow:
+    0 0 0 1px rgba(255, 158, 44, 0.12),
+    0 0 22px rgba(255, 158, 44, 0.06);
 }
 
 .chat-input:focus-within {
@@ -964,7 +1020,7 @@ button:disabled {
   padding: 0;
   border-radius: 50%;
   background: var(--primary);
-  color: #fff;
+  color: #201204;
   font-size: 17px;
   flex-shrink: 0;
 }
@@ -972,6 +1028,7 @@ button:disabled {
 .send-btn:disabled {
   background: var(--hover);
   color: var(--muted);
+  box-shadow: none;
 }
 
 .center-load {
@@ -1011,6 +1068,9 @@ button:disabled {
   font-size: 13px;
   font-weight: 700;
   margin-bottom: 8px;
+  font-family: var(--font-hud);
+  letter-spacing: 0.1em;
+  color: var(--accent);
 }
 
 /* 成员/NPC 行：头像占位 + 名称/用户名两行信息 + 右侧操作按钮 */
@@ -1045,8 +1105,9 @@ button:disabled {
 }
 
 .bot-avatar {
-  background: #e6f4ef;
-  color: var(--primary);
+  background: rgba(53, 208, 232, 0.12);
+  color: var(--accent);
+  border: 1px solid var(--border-cyan);
 }
 
 .member-info {
@@ -1122,18 +1183,20 @@ button:disabled {
 .item-meta {
   color: var(--muted);
   font-size: 12px;
+  font-family: var(--font-hud);
 }
 
 .tag {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: #e6f4ef;
+  background: rgba(255, 158, 44, 0.12);
   color: var(--primary);
   border-radius: 999px;
   padding: 2px 10px;
   font-size: 12px;
   cursor: pointer;
+  border: 1px solid rgba(255, 158, 44, 0.25);
 }
 
 .tag .remove {
