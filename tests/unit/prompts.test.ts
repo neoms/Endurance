@@ -28,6 +28,9 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toContain('你是群组机器人');
     // 群聊沉浸规则：第一人称扮演、口语化对话、不替别人发言
     expect(prompt).toContain('不要替其他角色或用户发言');
+    // 防回归：禁止复述他人发言、禁止输出「角色名：」标注（道尔消息混入库珀的话的根因）
+    expect(prompt).toContain('不要复述、转述或模仿其他角色');
+    expect(prompt).toContain('严禁出现任何角色名字加冒号的写法');
     expect(prompt).toContain('不使用 emoji 或网络流行语');
   });
 

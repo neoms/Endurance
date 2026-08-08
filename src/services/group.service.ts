@@ -75,6 +75,28 @@ const GROUP_MESSAGE_SENDER_INCLUDE = {
   bot: { select: { name: true } },
 };
 
+/**
+ * 收集「模型可能模仿的名字」集合（用于剥离回复开头的名字前缀）
+ *
+ * @param group 已加载机器人与成员的群组对象
+ * @returns string[] 去重后的名字数组：
+ *   - 全部 NPC 名（模型最常模仿的对象）；
+ *   - 全部成员用户名与昵称（防止模型模仿真人名字）。
+ * 说明：返回结果顺序无关；剥离函数内部会再按长度降序排序，避免短名误匹配。
+ */
+function collectSpeakerNames(group: {
+  bots: Array<{ bot: { name: string } }>;
+  members: Array<{ user: { username: string; displayName: string } }>;
+}): string[] {
+  return [
+    ...new Set([
+      ...group.bots.map((gb) => gb.bot.name),
+      ...group.members.map((m) => m.user.username),
+      ...group.members.map((m) => m.user.displayName),
+    ]),
+  ];
+}
+
 // 带发送者信息的群组消息（Prisma include 结果类型）
 type GroupMessageWithSender = GroupMessage & {
   user: { username: string; displayName: string } | null;
@@ -222,39 +244,87 @@ export function selectBotsForRound(
 }
 
 /**
- * 去除回复内容开头的「NPC 自报名」前缀
+ * 去除回复内容开头的「任意角色名」前缀
  *
  * @param content AI 生成的回复文本
- * @param botName NPC 名称
+ * @param names   群组内全部「可能被模型模仿的名字」集合
+ *                （全部 NPC 名 + 成员用户名/昵称）。
+ *                传入集合而非单个名字的原因：模型可能模仿历史里的任意名字
+ *                （如道尔回复开头写「库珀：…」），只剥自己的名字剥不干净，
+ *                会残留别人的名字前缀并在历史拼接时形成「道尔：库珀：…」双重前缀。
  * @returns string 去掉开头名称前缀后的内容（自动 trim）
  * 说明：真实大模型有时会模仿历史消息的「名字：」格式，在回复开头自报家门；
  * 发言者身份已由前端头像/名字标签展示，存库时应去掉该前缀——
  * 否则「内容带前缀 + 历史上下文再拼前缀」会形成双重前缀，
  * 模型再模仿该格式就可能输出多重前缀（如「库珀：库珀：…」）。
  */
-export function stripLeadingSpeakerName(content: string, botName: string): string {
-  // 名称可能含正则特殊字符，先转义
-  const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export function stripLeadingSpeakerName(content: string, names: string[]): string {
+  if (names.length === 0) {
+    return content.trim();
+  }
+  // 名称可能含正则特殊字符（如「·」），先转义；按长度降序避免短名先吃掉长名的前缀
+  const alternatives = [...new Set(names)]
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .sort((a, b) => b.length - a.length)
+    .join('|');
   // 名字后必须跟「说」/冒号/空白才视为前缀（避免误伤「库珀的想法」这类正常开头）；
-  // 允许连续多个前缀（处理模型多次自报家门）
-  const pattern = new RegExp(`^\\s*(?:${escaped}(?=说|[:：]|\\s)(?:说)?[:：]?\\s*)+`, 'u');
+  // 允许连续多个前缀（处理模型多次自报家门，无论自己的名字还是别人的名字）
+  const pattern = new RegExp(`^\\s*(?:(?:${alternatives})(?=说|[:：]|\\s)(?:说)?[:：]?\\s*)+`, 'u');
+  return content.replace(pattern, '').trim();
+}
+
+/**
+ * 全局剔除回复内容中的「角色名标注」（含开头与中间）
+ *
+ * @param content AI 生成的回复文本
+ * @param names   群组内全部「可能被模型模仿的名字」集合（与 stripLeadingSpeakerName 一致）
+ * @returns string 去掉所有「角色名(说)?：」标注后的内容（自动 trim）
+ * 说明：真实模型除了在开头自报家门，还可能在内容中间输出
+ * 「道尔：（点头）…」这类自标，或「库珀：塔斯，把参数调出来…」这类替别人发言的标注。
+ * 只剥开头剥不干净，因此这里用全局正则把任意位置的「角色名+冒号」标注一并剔除，
+ * 保证「每个角色只显示自己的话」，不残留别人的名字。
+ * 安全性：名字后必须紧跟「说」或冒号才视为标注（如「塔斯，把参数调出来」中的
+ * 「塔斯，」带逗号、不匹配），不会误伤呼唤/提到他人的正常内容。
+ */
+export function stripSpeakerNameMarkers(content: string, names: string[]): string {
+  if (names.length === 0) {
+    return content.trim();
+  }
+  // 名称可能含正则特殊字符（如「·」），先转义；按长度降序避免短名先吃掉长名的前缀
+  const alternatives = [...new Set(names)]
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .sort((a, b) => b.length - a.length)
+    .join('|');
+  // 全局匹配「角色名(说)?：」：lookahead 保证名字后是「说」或冒号，
+  // 再消费可选的「说」与必选的冒号（「库珀说：」与「库珀：」都覆盖）；
+  // g 标志配合 u 处理中文
+  const pattern = new RegExp(`(?:${alternatives})(?=说|[:：])(?:说)?[:：]\\s*`, 'gu');
   return content.replace(pattern, '').trim();
 }
 
 /**
  * 创建流式「开头名称前缀」剥离器（跨 chunk 状态机）
  *
- * @param botName NPC 名称
+ * @param names 群组内全部「可能被模型模仿的名字」集合
+ *              （全部 NPC 名 + 成员用户名/昵称，理由见 stripLeadingSpeakerName）
  * @returns (chunk: string) => string 逐块剥离函数
  * 说明：流式增量可能把前缀拆成多个 chunk（如「库」「珀：」），
  * 因此在确认开头不是名称前缀前先暂存内容；确认是前缀则剥离后输出剩余部分，
  * 确认不是则原样输出。用于群组流式回复，避免「名字前缀」在打字气泡里闪现后消失。
  */
-export function createLeadingNameStripper(botName: string): (chunk: string) => string {
-  const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export function createLeadingNameStripper(names: string[]): (chunk: string) => string {
+  const unique = [...new Set(names)];
+  if (unique.length === 0) {
+    // 没有可剥离的名字：直接透传（防御分支）
+    return (chunk: string) => chunk;
+  }
+  const alternatives = unique
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .sort((a, b) => b.length - a.length)
+    .join('|');
   // 单个前缀段：可选前导空白 + 名字 + 可选「说」 + 冒号/空白。
   // 名字后必须跟「说」/冒号/空白才视为前缀段（避免误伤「库珀的想法」这类正常开头）
-  const segment = new RegExp(`^\\s*(?:${escaped}(?=说|[:：]|\\s)(?:说)?[:：]?\\s*)`, 'u');
+  const segment = new RegExp(`^\\s*(?:(?:${alternatives})(?=说|[:：]|\\s)(?:说)?[:：]?\\s*)`, 'u');
   let pending = '';
   let done = false;
 
@@ -278,9 +348,9 @@ export function createLeadingNameStripper(botName: string): (chunk: string) => s
     if (pending === '') {
       return '';
     }
-    // 剩余是名字的部分前缀或恰好等于名字（还差分隔符，如「库」「库珀」）：
+    // 剩余是任一名字的部分前缀或恰好等于某名字（还差分隔符/剩余部分，如「库」「库珀」）：
     // 暂存等待下一块，避免「库/珀/：」分块时漏剥
-    if (pending.length <= botName.length && botName.startsWith(pending)) {
+    if (unique.some((name) => name.startsWith(pending))) {
       return '';
     }
     // 已确认开头不是（或不再是）前缀：原样输出剩余内容，此后透传
@@ -673,6 +743,7 @@ async function buildGroupHistory(
   groupId: string,
   excludeMessageId?: string,
   summarizer?: SemanticSummarizer | null,
+  speakerNames: string[] = [],
 ): Promise<Array<{ role: 'system' | 'user' | 'assistant'; content: string }>> {
   const recent = await prisma.groupMessage.findMany({
     where: { groupId, ...(excludeMessageId ? { id: { not: excludeMessageId } } : {}) },
@@ -700,8 +771,13 @@ async function buildGroupHistory(
       id: m.id,
       role: 'assistant' as const,
       // 先剥掉存量内容里可能残留的「NPC 名」前缀（历史数据/旧版本可能已带前缀），
-      // 再统一拼一次「名字：」——避免双重前缀进入上下文、模型模仿出多重前缀
-      content: botName ? `${botName}：${stripLeadingSpeakerName(m.content, botName)}` : m.content,
+      // 再统一拼一次「名字：」。剥离使用群组全部名字集合：
+      // 旧数据里可能残留任意角色的名字前缀（如道尔的消息里残留「库珀：」），
+      // 也可能在内容中间残留「道尔：（点头）…」自标——全局剔除全部标注，
+      // 避免形成「道尔：库珀：…」双重前缀诱发模型模仿
+      content: botName
+        ? `${botName}：${stripSpeakerNameMarkers(m.content, speakerNames)}`
+        : m.content,
     };
   });
   // 滑动窗口 + 总结：达到阈值时用摘要替换最早部分，保留最近 5 条原文
@@ -887,7 +963,10 @@ export async function sendGroupMessage(
       };
     }
 
-    const history = await buildGroupHistory(groupId, userMessage.id, summarizer);
+    // 收集全部「可能被模型模仿的名字」：用于剥离回复/历史开头的任意名字前缀
+    // （只剥当前机器人名字剥不干净，模型可能模仿别的角色名，如道尔回复「库珀：…」）
+    const speakerNames = collectSpeakerNames(group);
+    const history = await buildGroupHistory(groupId, userMessage.id, summarizer, speakerNames);
 
     const botMessages: GroupMessageOutput[] = [];
     // 本轮各 NPC 的成功回复（整轮全部成功才写缓存，任一走兜底则整轮不缓存）
@@ -906,9 +985,11 @@ export async function sendGroupMessage(
           history,
           userName: senderName,
         });
-        // 去掉回复开头的「NPC 名」前缀（真实模型有时会模仿历史格式自报家门）；
+        // 全局剔除「角色名标注」（含开头与内容中间）：真实模型可能模仿历史格式
+        // 自报家门（「道尔：…」）、写别人名字（「库珀：…」），或中间自标
+        // （「道尔：（点头）…」）——统一剔除后存库，保证消息里只有角色自己的话；
         // 剥完后为空（模型只回了名字）→ 用兜底文案，保证必有回复
-        const clean = stripLeadingSpeakerName(reply, bot.name);
+        const clean = stripSpeakerNameMarkers(reply, speakerNames);
         replyText = clean.trim() ? clean : FALLBACK_REPLY;
       } catch (err) {
         // 保证回复：生成失败时以兜底文案占位（不中断本轮其他机器人）
@@ -1133,7 +1214,10 @@ export async function streamSendGroupMessage(
       return;
     }
 
-    const history = await buildGroupHistory(groupId, userMessage.id, summarizer);
+    // 收集全部「可能被模型模仿的名字」（NPC 名 + 成员用户名/昵称），
+    // 用于流式剥离与历史残留前缀清理
+    const speakerNames = collectSpeakerNames(group);
+    const history = await buildGroupHistory(groupId, userMessage.id, summarizer, speakerNames);
     // 实际发言成员的用户名（Mock AI 回显「用户名说：」；ACL 保证发送者必然是成员）
     const senderName = group.members.find((m) => m.userId === userId)?.user.username ?? '用户';
 
@@ -1163,8 +1247,9 @@ export async function streamSendGroupMessage(
 
       // 流式生成：逐块累积并回调；失败时以兜底文案落库（保证必有回复）
       let partial = '';
-      // 跨 chunk 剥离开头的「NPC 名」前缀，避免前缀在打字气泡里闪现后消失
-      const strip = createLeadingNameStripper(bot.name);
+      // 跨 chunk 剥离开头的「任意角色名」前缀（自己的或别人的名字），
+      // 避免前缀在打字气泡里闪现后消失
+      const strip = createLeadingNameStripper(speakerNames);
       try {
         for await (const delta of aiService.streamWithRetry(
           {
@@ -1182,8 +1267,11 @@ export async function streamSendGroupMessage(
             events.botDelta?.(pending.id, visible);
           }
         }
-        // 剥完前缀后内容为空（模型只回了名字）→ 用兜底文案，保证必有回复
-        const finalContent = partial.trim() ? partial : FALLBACK_REPLY;
+        // 全局剔除「角色名标注」（开头已由流式剥离器处理，这里补内容中间的
+        // 自标/他名标注，如「道尔：（点头）…」「库珀：…」）；
+        // 剥完后为空（模型只回了名字）→ 用兜底文案，保证必有回复
+        const cleaned = stripSpeakerNameMarkers(partial, speakerNames);
+        const finalContent = cleaned.trim() ? cleaned : FALLBACK_REPLY;
         const saved = await prisma.groupMessage.update({
           where: { id: pending.id },
           data: { content: finalContent, status: MessageStatus.SENT },

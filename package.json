@@ -18,6 +18,7 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
+    "db:clean-prefixes": "tsx scripts/clean-bot-prefixes.ts",
     "db:studio": "prisma studio",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
