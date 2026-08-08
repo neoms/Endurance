@@ -6,6 +6,7 @@
  * - 默认标题取首条用户消息（含超长截断）；
  * - 历史消息按时间顺序返回；
  * - clientRequestId 幂等去重；
+ * - 幂等键按对话隔离：跨用户复用不泄露他人消息、同用户跨对话互不影响；
  * - 空内容 422；跨用户发送/查看 404；
  * - AI 持续失败 → FAILED 占位 + retry 恢复；
  * - retry 的 409 场景（SENT 消息 / 人类消息）与跨用户 404。
@@ -123,6 +124,73 @@ describe('messages API', () => {
     expect(second.body.userMessage.id).toBe(first.body.userMessage.id);
     const list = await request(app).get(`/api/conversations/${id}/messages`).set(auth(token));
     expect(list.body.messages).toHaveLength(2);
+  });
+
+  it('does not leak messages across users when clientRequestId collides', async () => {
+    const userA = await registerUser(app, 'aliceiso');
+    const userB = await registerUser(app, 'bobiso');
+    const convA = await createConversation(app, userA.token);
+    const convB = await createConversation(app, userB.token);
+    const idA = convA.body.conversation.id as string;
+    const idB = convB.body.conversation.id as string;
+
+    // A 先使用该幂等键发送消息
+    await request(app)
+      .post(`/api/conversations/${idA}/messages`)
+      .set(auth(userA.token))
+      .send({ content: 'A 的机密消息', clientRequestId: 'shared-req-000001' });
+
+    // B 在自己的对话中复用同一幂等键：必须拿到自己的消息，而不是 A 的消息
+    const resB = await request(app)
+      .post(`/api/conversations/${idB}/messages`)
+      .set(auth(userB.token))
+      .send({ content: 'B 自己的消息', clientRequestId: 'shared-req-000001' });
+    expect(resB.status).toBe(201);
+    expect(resB.body.userMessage.content).toBe('B 自己的消息');
+
+    // B 的消息确实落库（防止「命中他人幂等键导致自身消息丢失」）
+    const listB = await request(app)
+      .get(`/api/conversations/${idB}/messages`)
+      .set(auth(userB.token));
+    expect(
+      listB.body.messages.some(
+        (m: { senderType: string; content: string }) =>
+          m.senderType === 'HUMAN' && m.content === 'B 自己的消息',
+      ),
+    ).toBe(true);
+
+    // A 的消息仍只属于 A
+    const listA = await request(app)
+      .get(`/api/conversations/${idA}/messages`)
+      .set(auth(userA.token));
+    expect(
+      listA.body.messages.some(
+        (m: { senderType: string; content: string }) =>
+          m.senderType === 'HUMAN' && m.content === 'A 的机密消息',
+      ),
+    ).toBe(true);
+  });
+
+  it('allows the same clientRequestId in different conversations of the same user', async () => {
+    const { token } = await registerUser(app, 'multiconv');
+    const conv1 = await createConversation(app, token);
+    const conv2 = await createConversation(app, token);
+    const id1 = conv1.body.conversation.id as string;
+    const id2 = conv2.body.conversation.id as string;
+
+    const first = await request(app)
+      .post(`/api/conversations/${id1}/messages`)
+      .set(auth(token))
+      .send({ content: '第一对话', clientRequestId: 'same-req-000001' });
+    const second = await request(app)
+      .post(`/api/conversations/${id2}/messages`)
+      .set(auth(token))
+      .send({ content: '第二对话', clientRequestId: 'same-req-000001' });
+
+    // 两条消息都应正常落库：幂等键作用域是「对话」，而非全局或用户
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(second.body.userMessage.id).not.toBe(first.body.userMessage.id);
   });
 
   it('rejects empty content with 422', async () => {

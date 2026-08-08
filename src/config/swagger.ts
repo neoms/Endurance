@@ -265,7 +265,9 @@ const options: swaggerJsdoc.Options = {
               type: 'string',
               minLength: 8,
               maxLength: 64,
-              description: '幂等键（可选）：相同键重复提交不会产生重复消息',
+              description:
+                '幂等键（可选）：同一对话内相同键重复提交不会产生重复消息；' +
+                '不同对话可使用相同幂等键，互不影响',
               example: 'req-00000001',
             },
           },

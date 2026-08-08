@@ -122,7 +122,7 @@ model Message {
   status          MessageStatus @default(SENT)
   errorCode       String? // AI 失败错误码（如 AI_TIMEOUT / AI_UNAVAILABLE）
   errorMessage    String?
-  clientRequestId String?       @unique // 幂等键：防止客户端重复提交产生重复消息
+  clientRequestId String? // 幂等键：防止客户端重复提交产生重复消息（同一对话内唯一）
   createdAt       DateTime      @default(now())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -130,6 +130,11 @@ model Message {
 
   // 历史消息按时间顺序查询的索引
   @@index([conversationId, createdAt])
+  // 幂等键复合唯一约束：限定在「同一对话」内唯一。
+  // 设计原因：若键全局唯一，用户 B 复用用户 A 的 clientRequestId 时会命中 A 的消息，
+  // 造成跨用户数据泄露与 B 的消息丢失；限定到对话后，配合对话所有权校验（ACL）
+  // 天然保证幂等键按用户隔离。
+  @@unique([conversationId, clientRequestId])
   @@map("messages")
 }
 

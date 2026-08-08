@@ -6,7 +6,9 @@
  * 2. 调用 AI 生成回复（含重试与超时），成功则回复落库（SENT）；
  * 3. 重试耗尽仍失败时，AI 消息以 FAILED 状态占位并记录 errorCode/errorMessage，
  *    前端可见「回复失败，可重试」；
- * 4. clientRequestId 幂等：相同键重复提交直接返回首次结果，不产生重复消息；
+ * 4. clientRequestId 幂等：同一对话内相同键重复提交直接返回首次结果，不产生重复消息；
+ *    幂等键唯一约束限定为 (conversationId, clientRequestId) 复合键——查找时天然
+ *    限定在已通过所有权校验的对话内，避免跨用户/跨对话误命中造成数据泄露或丢失；
  * 5. 对话仍为默认标题时，首条用户消息（超长截断）自动设为标题。
  *
  * 【ACL】
@@ -114,10 +116,17 @@ export async function sendMessage(
   await assertConversationOwnership(userId, conversationId);
   const content = input.content.trim();
 
-  // 幂等：clientRequestId 已存在时直接返回首次结果，不重复生成
+  // 幂等：以「对话 + clientRequestId」复合键查找（唯一约束见 schema）。
+  // 对话 id 已通过上面的所有权校验，因此命中记录必属于当前用户，杜绝跨用户泄露；
+  // 命中时直接返回首次结果，不重复生成，避免客户端重复提交产生重复消息。
   if (input.clientRequestId) {
     const existing = await prisma.message.findUnique({
-      where: { clientRequestId: input.clientRequestId },
+      where: {
+        conversationId_clientRequestId: {
+          conversationId,
+          clientRequestId: input.clientRequestId,
+        },
+      },
     });
     if (existing) {
       const existingAi = await prisma.message.findFirst({

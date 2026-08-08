@@ -6,9 +6,11 @@
  * - 密码使用 bcrypt 哈希后入库，绝不落明文；
  * - 登录失败统一返回 401 INVALID_CREDENTIALS，不区分「用户不存在」与「密码错误」，
  *   防止用户枚举；
+ * - 注册做「先查重再创建」，并发下仍可能撞唯一约束（P2002），统一转换为 409，
+ *   避免竞态返回 500；
  * - 日志只记录用户名/用户 id，绝不记录密码或 token。
  */
-import type { User } from '@prisma/client';
+import { Prisma, type User } from '@prisma/client';
 
 import { AppError } from '../lib/errors.js';
 import { signToken } from '../lib/jwt.js';
@@ -59,13 +61,24 @@ export async function register(input: RegisterInput): Promise<AuthResult> {
   }
 
   const passwordHash = await hashPassword(input.password);
-  const user = await prisma.user.create({
-    data: {
-      username,
-      passwordHash,
-      displayName: input.displayName?.trim() || username,
-    },
-  });
+  let user: User;
+  try {
+    user = await prisma.user.create({
+      data: {
+        username,
+        passwordHash,
+        displayName: input.displayName?.trim() || username,
+      },
+    });
+  } catch (err) {
+    // 并发竞态：两个请求同时通过查重后都执行 create，后到者撞唯一约束（P2002）。
+    // 这里把它归一化为 409，与前置查重返回的错误保持一致，避免客户端收到 500。
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      logger.warn({ username }, 'auth: register race, username taken (unique constraint)');
+      throw new AppError(409, 'USERNAME_TAKEN', 'Username is already taken');
+    }
+    throw err;
+  }
 
   logger.info({ userId: user.id, username }, 'auth: user registered');
   return { token: issueToken(user), user: toPublicUser(user) };

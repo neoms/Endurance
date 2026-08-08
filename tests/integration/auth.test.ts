@@ -5,13 +5,15 @@
  * - 注册成功返回 token + 脱敏用户信息；
  * - 重复用户名 409、非法入参 422；
  * - 登录成功 / 密码错误 401；
- * - /me 三种场景：有效 token 200、无 token 401、无效 token 401。
+ * - /me 三种场景：有效 token 200、无 token 401、无效 token 401；
+ * - 并发注册竞态：唯一约束冲突归一化为 409，不返回 500。
  */
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from '../../src/app.js';
 import { prisma } from '../../src/lib/prisma.js';
+import { register } from '../../src/services/auth.service.js';
 import { auth, registerUser } from '../helpers.js';
 
 const app = createApp();
@@ -99,5 +101,24 @@ describe('auth API', () => {
   it('returns 401 on /me with an invalid token', async () => {
     const res = await request(app).get('/api/auth/me').set(auth('not-a-real-token'));
     expect(res.status).toBe(401);
+  });
+
+  it('converts unique-constraint race to 409 (no 500)', async () => {
+    // 直接插入同名用户，模拟「另一个并发请求已经创建成功」的中间状态
+    await prisma.user.create({
+      data: { username: 'raceuser', passwordHash: 'x', displayName: 'x' },
+    });
+    // 模拟竞态：findUnique 查重返回 null（检查通过，但数据已存在）
+    const spy = vi.spyOn(prisma.user, 'findUnique').mockResolvedValue(null);
+    try {
+      await expect(
+        register({ username: 'raceuser', password: 'password123' }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'USERNAME_TAKEN',
+      });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

@@ -442,7 +442,7 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
    *     summary: 发送消息（触发 AI 回复）
    *     description: 保存用户消息并调用 AI 生成回复；用户消息先落库，
    *       AI 重试耗尽时回复以 FAILED 状态占位（前端可展示「回复失败，可重试」）；
-   *       携带 clientRequestId 可幂等去重。
+   *       携带 clientRequestId 可在同一对话内幂等去重（不同对话互不影响）。
    *     security:
    *       - bearerAuth: []
    *     parameters:
