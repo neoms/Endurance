@@ -21,6 +21,9 @@ export interface ConversationTagOutput {
 export interface ConversationOutput {
   id: string;
   title: string;
+  // 是否仍为默认标题（未自定义）：为 true 时首条用户消息会自动替换标题。
+  // 前端据此在发送首条消息后立即把标题更新为消息内容（无需重新拉取详情）
+  isDefaultTitle: boolean;
   createdAt: Date;
   updatedAt: Date;
   tags: ConversationTagOutput[];

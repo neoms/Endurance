@@ -150,10 +150,15 @@ const options: swaggerJsdoc.Options = {
         // 个人对话（含标签列表）
         Conversation: {
           type: 'object',
-          required: ['id', 'title', 'createdAt', 'updatedAt', 'tags'],
+          required: ['id', 'title', 'isDefaultTitle', 'createdAt', 'updatedAt', 'tags'],
           properties: {
             id: { type: 'string', description: '对话 id', example: 'cmxxxxxxx' },
             title: { type: 'string', description: '对话标题', example: '学习计划' },
+            isDefaultTitle: {
+              type: 'boolean',
+              description: '是否仍为默认标题（未自定义）：为 true 时首条用户消息会替换标题',
+              example: true,
+            },
             createdAt: { type: 'string', format: 'date-time', description: '创建时间' },
             updatedAt: { type: 'string', format: 'date-time', description: '最近更新时间' },
             tags: {

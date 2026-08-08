@@ -8,7 +8,8 @@
  *
  * 【数据刷新策略】
  * 边栏在路由变化与自身操作（新建/改名/删除/标签）后刷新列表；
- * 主区域内的操作（如发送首条消息改标题）会在下一次导航时同步到边栏。
+ * 主区域内的操作（如发送首条消息改标题）通过 conversation-updated 自定义事件
+ * 立即同步到边栏，无需等待下一次导航。
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -102,6 +103,16 @@ export default function AppLayout() {
     void loadConversations();
     void loadGroups();
   }, [location.pathname, loadConversations, loadGroups]);
+
+  // 监听聊天页发出的「对话已更新」事件（如发送首条消息后标题改变），
+  // 立即刷新对话列表，保证侧边栏标题与聊天页一致
+  useEffect(() => {
+    const onConversationUpdated = () => {
+      void loadConversations();
+    };
+    window.addEventListener('conversation-updated', onConversationUpdated);
+    return () => window.removeEventListener('conversation-updated', onConversationUpdated);
+  }, [loadConversations]);
 
   // 当前选中的对话/群组 id（用于列表高亮）
   const activeConversationId = location.pathname.startsWith('/conversations/')

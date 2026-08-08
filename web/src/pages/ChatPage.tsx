@@ -16,6 +16,10 @@ import type { Conversation, Message } from '../api/types.js';
 import { useAuth } from '../auth/AuthContext.js';
 import MentionText from '../components/MentionText.js';
 
+// 默认标题截断长度：与后端 message.service 的 MAX_TITLE_LENGTH 保持一致，
+// 首条消息用作标题时超长截断（避免侧边栏被长标题撑爆）
+const MAX_TITLE_LENGTH = 30;
+
 export default function ChatPage() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
@@ -123,6 +127,20 @@ export default function ChatPage() {
           user_message: (data) => {
             const message = (data as { message: Message }).message;
             setMessages((prev) => [...prev, message]);
+            // 默认标题对话：首条用户消息立即成为标题（与后端替换规则一致：
+            // 仅当 isDefaultTitle=true 且从未手动改过才替换），并同步给侧边栏列表
+            setConversation((prev) => {
+              if (!prev || !prev.isDefaultTitle) {
+                return prev;
+              }
+              const title =
+                message.content.length > MAX_TITLE_LENGTH
+                  ? `${message.content.slice(0, MAX_TITLE_LENGTH)}…`
+                  : message.content;
+              return { ...prev, title, isDefaultTitle: false };
+            });
+            // 通知侧边栏重新拉取对话列表（标题已变化，立即同步显示）
+            window.dispatchEvent(new Event('conversation-updated'));
           },
           ai_delta: (data) => {
             const delta = (data as { delta: string }).delta;

@@ -30,6 +30,8 @@ export interface Tag {
 export interface Conversation {
   id: string;
   title: string;
+  // 是否仍为默认标题：发送首条消息后前端据此立即更新标题（无需重新拉取详情）
+  isDefaultTitle: boolean;
   createdAt: string;
   updatedAt: string;
   tags: Tag[];

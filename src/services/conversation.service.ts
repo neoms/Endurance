@@ -56,6 +56,7 @@ function toConversationOutput(conversation: ConversationWithTags): ConversationO
   return {
     id: conversation.id,
     title: conversation.title,
+    isDefaultTitle: conversation.isDefaultTitle,
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     tags: conversation.tags.map((entry): ConversationTagOutput => ({
