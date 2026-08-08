@@ -13,6 +13,7 @@
 import { Router } from 'express';
 
 import { AiService } from '../../services/ai/ai.service.js';
+import type { RateLimiterMiddleware } from '../../lib/rate-limit.js';
 import { retryAiMessage } from '../../services/message.service.js';
 import { authRequired, requireUser } from '../middleware/auth.js';
 import { paramId } from '../middleware/params.js';
@@ -20,10 +21,13 @@ import { paramId } from '../middleware/params.js';
 /**
  * 创建消息路由组
  *
- * @param deps { aiService } AI 服务（重试时重新生成回复）
+ * @param deps { aiService, aiRateLimiter? } AI 服务与限流中间件（重试也消耗 AI 额度）
  * @returns Router 已装配的 Express Router
  */
-export function createMessagesRouter(deps: { aiService: AiService }) {
+export function createMessagesRouter(deps: {
+  aiService: AiService;
+  aiRateLimiter?: RateLimiterMiddleware | null;
+}) {
   const router = Router();
 
   // 该路由组下所有接口都需要登录
@@ -80,12 +84,22 @@ export function createMessagesRouter(deps: { aiService: AiService }) {
    *           application/json:
    *             schema:
    *               $ref: '#/components/schemas/ErrorResponse'
+   *       '429':
+   *         description: 请求过于频繁（按用户限流，防止高频消耗 AI 额度）
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
    */
-  router.post('/:id/retry', async (req, res) => {
-    const user = requireUser(req);
-    const aiMessage = await retryAiMessage(deps.aiService, user.id, user.username, paramId(req));
-    res.json({ aiMessage });
-  });
+  router.post(
+    '/:id/retry',
+    ...(deps.aiRateLimiter ? [deps.aiRateLimiter] : []),
+    async (req, res) => {
+      const user = requireUser(req);
+      const aiMessage = await retryAiMessage(deps.aiService, user.id, user.username, paramId(req));
+      res.json({ aiMessage });
+    },
+  );
 
   return router;
 }

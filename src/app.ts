@@ -28,7 +28,7 @@ import path from 'node:path';
 import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
 
-import { authRouter } from './api/routes/auth.js';
+import { createAuthRouter } from './api/routes/auth.js';
 import { botsRouter } from './api/routes/bots.js';
 import { createConversationsRouter } from './api/routes/conversations.js';
 import { createGroupsRouter } from './api/routes/groups.js';
@@ -37,6 +37,7 @@ import { env } from './config/env.js';
 import { swaggerSpec } from './config/swagger.js';
 import { errorHandler, notFoundHandler } from './lib/errors.js';
 import { logger } from './lib/logger.js';
+import { createRateLimiter, ipKey, userKey, type RateLimiterMiddleware } from './lib/rate-limit.js';
 import { healthRouter } from './routes/health.js';
 import { AiService } from './services/ai/ai.service.js';
 import { AiReplyCache } from './services/ai/cache.js';
@@ -45,11 +46,21 @@ import { createDefaultAiProvider } from './services/ai/provider.factory.js';
 /**
  * 应用构建选项
  *
- * @property aiService 可选的 AI 服务（默认 MockAiProvider），测试可注入故障实现
+ * @property aiService   可选的 AI 服务（默认 MockAiProvider），测试可注入故障实现
+ * @property rateLimiters 可选的限流器覆盖（测试注入低阈值限流器做端到端验证；
+ *                        缺省时按环境启用：NODE_ENV=test 自动关闭）
  */
 export interface AppOptions {
   aiService?: AiService;
+  rateLimiters?: {
+    auth?: RateLimiterMiddleware | null;
+    ai?: RateLimiterMiddleware | null;
+  };
 }
+
+// 认证接口限流：按客户端 IP，固定 10 次 / 15 分钟（防暴力注册/登录）
+const AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_RATE_LIMIT_MAX = 10;
 
 /**
  * 创建并配置 Express 应用
@@ -63,6 +74,30 @@ export function createApp(options: AppOptions = {}) {
     options.aiService ?? new AiService(createDefaultAiProvider(env.DEEPSEEK_API_KEY));
   // AI 回复缓存：相同问题在 TTL 内直接回放上次回复（个人=单条，群组=整轮 NPC 回复）
   const aiCache = new AiReplyCache(env.AI_CACHE_TTL_MS);
+
+  // 限流：测试环境默认关闭（避免干扰既有用例），测试可注入自定义限流器验证 429 路径；
+  // 生产/开发环境启用——认证按 IP、AI 接口按用户（见 rate-limit.ts）
+  const rateLimitingEnabled = env.NODE_ENV !== 'test';
+  const authRateLimiter =
+    options.rateLimiters?.auth ??
+    (rateLimitingEnabled
+      ? createRateLimiter({
+          windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
+          max: AUTH_RATE_LIMIT_MAX,
+          keyPrefix: 'auth',
+          keyFrom: ipKey,
+        })
+      : null);
+  const aiRateLimiter =
+    options.rateLimiters?.ai ??
+    (rateLimitingEnabled
+      ? createRateLimiter({
+          windowMs: env.RATE_LIMIT_WINDOW_MS,
+          max: env.RATE_LIMIT_MAX,
+          keyPrefix: 'ai',
+          keyFrom: userKey,
+        })
+      : null);
   const app = express();
 
   // 隐藏 X-Powered-By 响应头，降低技术栈信息泄露
@@ -83,11 +118,11 @@ export function createApp(options: AppOptions = {}) {
   app.use(pinoHttp({ logger }));
 
   // 业务路由：认证、个人对话、群组、机器人、AI 消息重试、健康检查
-  app.use('/api/auth', authRouter);
-  app.use('/api/conversations', createConversationsRouter({ aiService, aiCache }));
-  app.use('/api/groups', createGroupsRouter({ aiService, aiCache }));
+  app.use('/api/auth', createAuthRouter({ authRateLimiter }));
+  app.use('/api/conversations', createConversationsRouter({ aiService, aiCache, aiRateLimiter }));
+  app.use('/api/groups', createGroupsRouter({ aiService, aiCache, aiRateLimiter }));
   app.use('/api/bots', botsRouter);
-  app.use('/api/messages', createMessagesRouter({ aiService }));
+  app.use('/api/messages', createMessagesRouter({ aiService, aiRateLimiter }));
   app.use('/api/health', healthRouter);
 
   // 前端静态资源：若 web/dist 已构建（npm run build:web），由 Express 托管，实现一体化部署

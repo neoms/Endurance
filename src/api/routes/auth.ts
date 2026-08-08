@@ -9,135 +9,172 @@
  * 【文档约定】
  * 每个接口通过 `@openapi` JSDoc 注释维护 OpenAPI 文档（swagger-jsdoc 自动收集），
  * 修改接口时务必同步更新注释，保证「文档与实现一致」。
+ *
+ * 【限流说明】
+ * 注册/登录按「客户端 IP」限流（默认 10 次 / 15 分钟），防止暴力撞库；
+ * 限流中间件由应用层注入（测试环境默认关闭），此处只负责挂载。
  */
 import { Router } from 'express';
 
 import { getCurrentUser, login, register } from '../../services/auth.service.js';
+import type { RateLimiterMiddleware } from '../../lib/rate-limit.js';
 import { authRequired, requireUser } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import { loginSchema, registerSchema } from '../validators/auth.js';
 
-export const authRouter = Router();
-
 /**
- * POST /api/auth/register 用户注册
+ * 创建认证路由组
  *
- * 入参：{ username, password, displayName? }
- * 返回值：201 { token, user }；用户名已存在 409；参数不合法 422。
- *
- * @openapi
- * /api/auth/register:
- *   post:
- *     tags: [Auth]
- *     summary: 用户注册
- *     description: 使用用户名/密码注册新用户，成功后直接返回 JWT 与用户信息（前端可免二次登录）。
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/RegisterRequest'
- *     responses:
- *       '201':
- *         description: 注册成功，返回 JWT 与用户信息
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/AuthResult'
- *       '409':
- *         description: 用户名已被占用
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       '422':
- *         description: 入参校验失败
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
+ * @param deps { authRateLimiter? } 注册/登录限流中间件（按 IP；测试环境可传 null 关闭）
+ * @returns Router 已装配全部认证路由的 Express Router
  */
-authRouter.post('/register', validate(registerSchema), async (req, res) => {
-  const result = await register(req.body);
-  res.status(201).json(result);
-});
+export function createAuthRouter(deps: { authRateLimiter?: RateLimiterMiddleware | null } = {}) {
+  const authRouter = Router();
 
-/**
- * POST /api/auth/login 用户登录
- *
- * 入参：{ username, password }
- * 返回值：200 { token, user }；用户名或密码错误 401；参数不合法 422。
- *
- * @openapi
- * /api/auth/login:
- *   post:
- *     tags: [Auth]
- *     summary: 用户登录
- *     description: 校验用户名与密码，成功后返回 JWT 与用户信息。
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/LoginRequest'
- *     responses:
- *       '200':
- *         description: 登录成功，返回 JWT 与用户信息
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/AuthResult'
- *       '401':
- *         description: 用户名或密码错误
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       '422':
- *         description: 入参校验失败
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- */
-authRouter.post('/login', validate(loginSchema), async (req, res) => {
-  const result = await login(req.body);
-  res.json(result);
-});
+  /**
+   * POST /api/auth/register 用户注册
+   *
+   * 入参：{ username, password, displayName? }
+   * 返回值：201 { token, user }；用户名已存在 409；参数不合法 422。
+   *
+   * @openapi
+   * /api/auth/register:
+   *   post:
+   *     tags: [Auth]
+   *     summary: 用户注册
+   *     description: 使用用户名/密码注册新用户，成功后直接返回 JWT 与用户信息（前端可免二次登录）。
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             $ref: '#/components/schemas/RegisterRequest'
+   *     responses:
+   *       '201':
+   *         description: 注册成功，返回 JWT 与用户信息
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/AuthResult'
+   *       '409':
+   *         description: 用户名已被占用
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   *       '422':
+   *         description: 入参校验失败
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   *       '429':
+   *         description: 请求过于频繁（按 IP 限流，如暴力注册）
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   */
+  authRouter.post(
+    '/register',
+    ...(deps.authRateLimiter ? [deps.authRateLimiter] : []),
+    validate(registerSchema),
+    async (req, res) => {
+      const result = await register(req.body);
+      res.status(201).json(result);
+    },
+  );
 
-/**
- * GET /api/auth/me 获取当前用户
- *
- * 入参：Authorization: Bearer <token>（必需）
- * 返回值：200 { user }；未携带/无效 token 401。
- *
- * @openapi
- * /api/auth/me:
- *   get:
- *     tags: [Auth]
- *     summary: 获取当前用户信息
- *     description: 根据请求头中的 JWT 返回当前登录用户信息；未携带或无效 token 返回 401。
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       '200':
- *         description: 当前用户信息
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required: [user]
- *               properties:
- *                 user:
- *                   $ref: '#/components/schemas/User'
- *       '401':
- *         description: 未登录或 token 无效/过期
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- */
-authRouter.get('/me', authRequired, async (req, res) => {
-  const user = requireUser(req);
-  res.json({ user: await getCurrentUser(user.id) });
-});
+  /**
+   * POST /api/auth/login 用户登录
+   *
+   * 入参：{ username, password }
+   * 返回值：200 { token, user }；用户名或密码错误 401；参数不合法 422。
+   *
+   * @openapi
+   * /api/auth/login:
+   *   post:
+   *     tags: [Auth]
+   *     summary: 用户登录
+   *     description: 校验用户名与密码，成功后返回 JWT 与用户信息。
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             $ref: '#/components/schemas/LoginRequest'
+   *     responses:
+   *       '200':
+   *         description: 登录成功，返回 JWT 与用户信息
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/AuthResult'
+   *       '401':
+   *         description: 用户名或密码错误
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   *       '422':
+   *         description: 入参校验失败
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   *       '429':
+   *         description: 请求过于频繁（按 IP 限流，如暴力登录）
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   */
+  authRouter.post(
+    '/login',
+    ...(deps.authRateLimiter ? [deps.authRateLimiter] : []),
+    validate(loginSchema),
+    async (req, res) => {
+      const result = await login(req.body);
+      res.json(result);
+    },
+  );
+
+  /**
+   * GET /api/auth/me 获取当前用户
+   *
+   * 入参：Authorization: Bearer <token>（必需）
+   * 返回值：200 { user }；未携带/无效 token 401。
+   *
+   * @openapi
+   * /api/auth/me:
+   *   get:
+   *     tags: [Auth]
+   *     summary: 获取当前用户信息
+   *     description: 根据请求头中的 JWT 返回当前登录用户信息；未携带或无效 token 返回 401。
+   *     security:
+   *       - bearerAuth: []
+   *     responses:
+   *       '200':
+   *         description: 当前用户信息
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               required: [user]
+   *               properties:
+   *                 user:
+   *                   $ref: '#/components/schemas/User'
+   *       '401':
+   *         description: 未登录或 token 无效/过期
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   */
+  authRouter.get('/me', authRequired, async (req, res) => {
+    const user = requireUser(req);
+    res.json({ user: await getCurrentUser(user.id) });
+  });
+
+  return authRouter;
+}

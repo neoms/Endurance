@@ -48,6 +48,10 @@ const envSchema = z.object({
   // AI 回复缓存 TTL（毫秒）：同一对话/群组内相同问题在 TTL 内直接回放上次回复，
   // 避免重复调用外部 AI；设为 0 可关闭缓存（每次都真实调用）
   AI_CACHE_TTL_MS: z.coerce.number().int().min(0).default(3600_000),
+  // AI 接口限流：每个用户在一个时间窗口内最多允许的请求数（发送消息/重试，
+  // 防止高频调用消耗 AI 额度）；认证接口（注册/登录）按 IP 固定限流
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).default(60_000),
+  RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(30),
 });
 
 // 由 Schema 推导出的环境变量类型（供全局引用）

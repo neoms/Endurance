@@ -21,6 +21,7 @@ import { Router } from 'express';
 
 import { AiService } from '../../services/ai/ai.service.js';
 import type { AiReplyCache } from '../../services/ai/cache.js';
+import type { RateLimiterMiddleware } from '../../lib/rate-limit.js';
 import {
   addTagToConversation,
   createConversation,
@@ -49,12 +50,13 @@ import {
 /**
  * 创建对话路由组
  *
- * @param deps { aiService, aiCache? } AI 服务与回复缓存（相同问题回放上次回复）
+ * @param deps { aiService, aiCache?, aiRateLimiter? } AI 服务、回复缓存与限流中间件
  * @returns Router 已装配全部对话相关路由的 Express Router
  */
 export function createConversationsRouter(deps: {
   aiService: AiService;
   aiCache?: AiReplyCache | null;
+  aiRateLimiter?: RateLimiterMiddleware | null;
 }) {
   const conversationsRouter = Router();
 
@@ -500,64 +502,75 @@ export function createConversationsRouter(deps: {
    *           application/json:
    *             schema:
    *               $ref: '#/components/schemas/ErrorResponse'
+   *       '429':
+   *         description: 请求过于频繁（按用户限流，防止高频消耗 AI 额度）
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
    */
-  conversationsRouter.post('/:id/messages', validate(sendMessageSchema), async (req, res) => {
-    const user = requireUser(req);
-    const conversationId = paramId(req);
+  conversationsRouter.post(
+    '/:id/messages',
+    ...(deps.aiRateLimiter ? [deps.aiRateLimiter] : []),
+    validate(sendMessageSchema),
+    async (req, res) => {
+      const user = requireUser(req);
+      const conversationId = paramId(req);
 
-    // 流式模式：SSE 逐块推送 AI 回复（前端聊天页使用）；默认保持 JSON 同步返回
-    if (req.query.stream === 'true') {
-      // 客户端断连时 abort 底层 AI 调用：监听响应流 close（连接被终止时触发）
-      const controller = new AbortController();
-      let settled = false;
-      const onClose = () => {
-        if (!settled) {
-          controller.abort();
-        }
-      };
-      res.on('close', onClose);
+      // 流式模式：SSE 逐块推送 AI 回复（前端聊天页使用）；默认保持 JSON 同步返回
+      if (req.query.stream === 'true') {
+        // 客户端断连时 abort 底层 AI 调用：监听响应流 close（连接被终止时触发）
+        const controller = new AbortController();
+        let settled = false;
+        const onClose = () => {
+          if (!settled) {
+            controller.abort();
+          }
+        };
+        res.on('close', onClose);
 
-      startSse(res);
-      try {
-        await streamSendMessage(
-          deps.aiService,
-          user.id,
-          conversationId,
-          user.username,
-          req.body,
-          {
-            userMessage: (message) => sendSseEvent(res, 'user_message', { message }),
-            aiDelta: (delta) => sendSseEvent(res, 'ai_delta', { delta }),
-            aiDone: (message) => sendSseEvent(res, 'ai_done', { message }),
-            aiError: (message) => sendSseEvent(res, 'ai_error', { message }),
-          },
-          controller.signal,
-          deps.aiCache,
-        );
-      } catch (err) {
-        // 首个事件发出前的失败（404 等）：以 error 事件告知前端
-        sendSseError(res, err);
-      } finally {
-        settled = true;
-        res.removeListener('close', onClose);
-        // 正常结束且尚未收尾时主动 end；客户端断连时 res 已结束，此调用无副作用
-        if (!res.writableEnded) {
-          res.end();
+        startSse(res);
+        try {
+          await streamSendMessage(
+            deps.aiService,
+            user.id,
+            conversationId,
+            user.username,
+            req.body,
+            {
+              userMessage: (message) => sendSseEvent(res, 'user_message', { message }),
+              aiDelta: (delta) => sendSseEvent(res, 'ai_delta', { delta }),
+              aiDone: (message) => sendSseEvent(res, 'ai_done', { message }),
+              aiError: (message) => sendSseEvent(res, 'ai_error', { message }),
+            },
+            controller.signal,
+            deps.aiCache,
+          );
+        } catch (err) {
+          // 首个事件发出前的失败（404 等）：以 error 事件告知前端
+          sendSseError(res, err);
+        } finally {
+          settled = true;
+          res.removeListener('close', onClose);
+          // 正常结束且尚未收尾时主动 end；客户端断连时 res 已结束，此调用无副作用
+          if (!res.writableEnded) {
+            res.end();
+          }
         }
+        return;
       }
-      return;
-    }
 
-    const result = await sendMessage(
-      deps.aiService,
-      user.id,
-      conversationId,
-      user.username,
-      req.body,
-      deps.aiCache,
-    );
-    res.status(201).json(result);
-  });
+      const result = await sendMessage(
+        deps.aiService,
+        user.id,
+        conversationId,
+        user.username,
+        req.body,
+        deps.aiCache,
+      );
+      res.status(201).json(result);
+    },
+  );
 
   /**
    * GET /api/conversations/{id}/messages 历史消息（游标分页）

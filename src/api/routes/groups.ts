@@ -19,6 +19,7 @@ import { Router } from 'express';
 
 import { AiService } from '../../services/ai/ai.service.js';
 import type { AiReplyCache } from '../../services/ai/cache.js';
+import type { RateLimiterMiddleware } from '../../lib/rate-limit.js';
 import {
   addBotToGroup,
   addGroupMember,
@@ -49,10 +50,14 @@ import { sendSseError, sendSseEvent, startSse } from '../sse.js';
 /**
  * 创建群组路由组
  *
- * @param deps { aiService, aiCache? } AI 服务与回复缓存（相同问题回放整轮 NPC 回复）
+ * @param deps { aiService, aiCache?, aiRateLimiter? } AI 服务、回复缓存与限流中间件
  * @returns Router 已装配全部群组相关路由的 Express Router
  */
-export function createGroupsRouter(deps: { aiService: AiService; aiCache?: AiReplyCache | null }) {
+export function createGroupsRouter(deps: {
+  aiService: AiService;
+  aiCache?: AiReplyCache | null;
+  aiRateLimiter?: RateLimiterMiddleware | null;
+}) {
   const router = Router();
 
   // 该路由组下所有接口都需要登录
@@ -680,63 +685,74 @@ export function createGroupsRouter(deps: { aiService: AiService; aiCache?: AiRep
    *           application/json:
    *             schema:
    *               $ref: '#/components/schemas/ErrorResponse'
+   *       '429':
+   *         description: 请求过于频繁（按用户限流，防止高频消耗 AI 额度）
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
    */
-  router.post('/:id/messages', validate(sendGroupMessageSchema), async (req, res) => {
-    const user = requireUser(req);
-    const groupId = paramId(req);
+  router.post(
+    '/:id/messages',
+    ...(deps.aiRateLimiter ? [deps.aiRateLimiter] : []),
+    validate(sendGroupMessageSchema),
+    async (req, res) => {
+      const user = requireUser(req);
+      const groupId = paramId(req);
 
-    // 流式模式：SSE 逐块推送每个机器人的回复（前端群聊页使用）；默认保持 JSON 同步返回
-    if (req.query.stream === 'true') {
-      // 客户端断连时 abort 底层 AI 调用：监听响应流 close（连接被终止时触发）
-      const controller = new AbortController();
-      let settled = false;
-      const onClose = () => {
-        if (!settled) {
-          controller.abort();
-        }
-      };
-      res.on('close', onClose);
+      // 流式模式：SSE 逐块推送每个机器人的回复（前端群聊页使用）；默认保持 JSON 同步返回
+      if (req.query.stream === 'true') {
+        // 客户端断连时 abort 底层 AI 调用：监听响应流 close（连接被终止时触发）
+        const controller = new AbortController();
+        let settled = false;
+        const onClose = () => {
+          if (!settled) {
+            controller.abort();
+          }
+        };
+        res.on('close', onClose);
 
-      startSse(res);
-      try {
-        await streamSendGroupMessage(
-          deps.aiService,
-          user.id,
-          groupId,
-          req.body,
-          {
-            userMessage: (message) => sendSseEvent(res, 'user_message', { message }),
-            botStart: (message) => sendSseEvent(res, 'bot_start', { message }),
-            botDelta: (messageId, delta) => sendSseEvent(res, 'bot_delta', { messageId, delta }),
-            botDone: (message) => sendSseEvent(res, 'bot_done', { message }),
-            roundDone: () => sendSseEvent(res, 'round_done', { ok: true }),
-          },
-          controller.signal,
-          deps.aiCache,
-        );
-      } catch (err) {
-        // 首个事件发出前的失败（404/409/400 等）：以 error 事件告知前端
-        sendSseError(res, err);
-      } finally {
-        settled = true;
-        res.removeListener('close', onClose);
-        // 正常结束且尚未收尾时主动 end；客户端断连时 res 已结束，此调用无副作用
-        if (!res.writableEnded) {
-          res.end();
+        startSse(res);
+        try {
+          await streamSendGroupMessage(
+            deps.aiService,
+            user.id,
+            groupId,
+            req.body,
+            {
+              userMessage: (message) => sendSseEvent(res, 'user_message', { message }),
+              botStart: (message) => sendSseEvent(res, 'bot_start', { message }),
+              botDelta: (messageId, delta) => sendSseEvent(res, 'bot_delta', { messageId, delta }),
+              botDone: (message) => sendSseEvent(res, 'bot_done', { message }),
+              roundDone: () => sendSseEvent(res, 'round_done', { ok: true }),
+            },
+            controller.signal,
+            deps.aiCache,
+          );
+        } catch (err) {
+          // 首个事件发出前的失败（404/409/400 等）：以 error 事件告知前端
+          sendSseError(res, err);
+        } finally {
+          settled = true;
+          res.removeListener('close', onClose);
+          // 正常结束且尚未收尾时主动 end；客户端断连时 res 已结束，此调用无副作用
+          if (!res.writableEnded) {
+            res.end();
+          }
         }
+        return;
       }
-      return;
-    }
 
-    const result = await sendGroupMessage(
-      deps.aiService,
-      user.id,
-      paramId(req),
-      req.body,
-      deps.aiCache,
-    );
-    res.status(201).json(result);
-  });
+      const result = await sendGroupMessage(
+        deps.aiService,
+        user.id,
+        paramId(req),
+        req.body,
+        deps.aiCache,
+      );
+      res.status(201).json(result);
+    },
+  );
 
   /**
    * GET /api/groups/{id}/messages 群组历史消息（游标分页）
