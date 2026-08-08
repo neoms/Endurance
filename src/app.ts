@@ -25,7 +25,6 @@ import express from 'express';
 import helmet from 'helmet';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
 
 import { createAuthRouter } from './api/routes/auth.js';
@@ -36,8 +35,8 @@ import { createMessagesRouter } from './api/routes/messages.js';
 import { env } from './config/env.js';
 import { swaggerSpec } from './config/swagger.js';
 import { errorHandler, notFoundHandler } from './lib/errors.js';
-import { logger } from './lib/logger.js';
 import { createRateLimiter, ipKey, userKey, type RateLimiterMiddleware } from './lib/rate-limit.js';
+import { requestLogger } from './lib/request-logger.js';
 import { healthRouter } from './routes/health.js';
 import { AiService } from './services/ai/ai.service.js';
 import { AiReplyCache } from './services/ai/cache.js';
@@ -118,8 +117,14 @@ export function createApp(options: AppOptions = {}) {
   app.use(helmet());
   // 解析 JSON 请求体；limit 限制单次请求体大小，防止超大请求拖垮服务
   app.use(express.json({ limit: '1mb' }));
-  // 请求日志：记录 method/url/状态码/耗时；Authorization 头已在 logger 中脱敏
-  app.use(pinoHttp({ logger }));
+  // 请求日志中间件：生成请求 id（UUID）并建立日志上下文，响应结束时输出一行摘要
+  // （状态分层 + 慢请求标记 + 成功请求采样）；业务日志自动携带 requestId/userId
+  app.use(
+    requestLogger({
+      slowThresholdMs: env.SLOW_REQUEST_THRESHOLD_MS,
+      sampleRate: env.REQUEST_LOG_SAMPLE_RATE,
+    }),
+  );
 
   // 业务路由：认证、个人对话、群组、机器人、AI 消息重试、健康检查
   app.use('/api/auth', createAuthRouter({ authRateLimiter }));

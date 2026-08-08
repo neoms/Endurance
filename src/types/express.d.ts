@@ -4,7 +4,8 @@
  * 【作用】
  * 为 Express 的 Request 增加可选的 user 字段：
  * 经过 authRequired 中间件后，路由处理函数内即可通过 req.user
- * 拿到当前登录用户（类型安全，无需自行断言）。
+ * 拿到当前登录用户（类型安全，无需自行断言）；
+ * id 为请求日志中间件生成的请求唯一 id（UUID）。
  */
 import type { AuthUser } from './auth.js';
 
@@ -12,6 +13,8 @@ declare global {
   namespace Express {
     interface Request {
       user?: AuthUser;
+      /** 请求唯一 id（requestLogger 生成，业务日志据此关联） */
+      id: string;
     }
   }
 }

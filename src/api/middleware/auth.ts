@@ -19,6 +19,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { AppError } from '../../lib/errors.js';
 import { verifyToken } from '../../lib/jwt.js';
 import { logger } from '../../lib/logger.js';
+import { setContextUserId } from '../../lib/log-context.js';
 import { prisma } from '../../lib/prisma.js';
 import type { AuthUser } from '../../types/auth.js';
 
@@ -57,6 +58,8 @@ export async function authRequired(req: Request, _res: Response, next: NextFunct
   }
 
   logger.debug({ userId: user.id, username: user.username }, 'auth: authenticated');
+  // 写入请求日志上下文：该请求内随后的业务日志自动携带 userId（问题定位到操作者）
+  setContextUserId(user.id);
   req.user = user;
   next();
 }

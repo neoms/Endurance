@@ -27,6 +27,18 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   // pino 日志级别：级别越低输出越详细，便于问题排查时临时调低
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  // 日志文件路径（相对项目根）：留空时开发环境默认写 logs/app.log、生产环境不写文件
+  // （由容器采集 stdout）；显式指定路径则覆盖；设为 off 关闭文件日志；
+  // 测试环境（NODE_ENV=test）始终不写文件
+  LOG_FILE: z.string().trim().optional(),
+  // 日志文件单个大小上限（pino-roll 语法，如 10m/100m），达到后轮转
+  LOG_FILE_MAX_SIZE: z.string().trim().default('10m'),
+  // 日志轮转保留的历史文件数（超出删除最旧），控制磁盘占用上限
+  LOG_FILE_KEEP: z.coerce.number().int().min(1).default(7),
+  // 成功请求（<400）的日志采样率（0-1）：生产高流量时调低降噪；4xx/5xx 始终全量记录
+  REQUEST_LOG_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(1),
+  // 慢请求阈值（毫秒）：超过则请求日志标记 slow: true，便于快速发现性能劣化
+  SLOW_REQUEST_THRESHOLD_MS: z.coerce.number().int().min(0).default(2000),
   // JWT 签名密钥：生产环境必须注入足够长的随机值，此处仅为本地开发提供默认值
   JWT_SECRET: z.string().min(16).default('dev-only-secret-do-not-use-in-production'),
   // JWT 有效期（jsonwebtoken 时间字符串，例如 24h）

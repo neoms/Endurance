@@ -9,7 +9,7 @@
  */
 import { createApp } from './app.js';
 import { env } from './config/env.js';
-import { logger } from './lib/logger.js';
+import { logger, logFilePath } from './lib/logger.js';
 
 // 创建 Express 应用（中间件与路由的装配见 src/app.ts）
 const app = createApp();
@@ -21,7 +21,10 @@ const app = createApp();
  * @param callback 监听成功后的回调：输出启动日志（端口、环境、Node 版本）
  */
 const server = app.listen(env.PORT, () => {
-  logger.info({ port: env.PORT, env: env.NODE_ENV, node: process.version }, 'server started');
+  logger.info(
+    { port: env.PORT, env: env.NODE_ENV, node: process.version, logFile: logFilePath },
+    'server started',
+  );
 });
 
 /**
