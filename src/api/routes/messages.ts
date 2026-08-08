@@ -13,6 +13,7 @@
 import { Router } from 'express';
 
 import { AiService } from '../../services/ai/ai.service.js';
+import type { SemanticSummarizer } from '../../services/ai/summarizer.js';
 import type { RateLimiterMiddleware } from '../../lib/rate-limit.js';
 import { retryAiMessage } from '../../services/message.service.js';
 import { authRequired, requireUser } from '../middleware/auth.js';
@@ -21,11 +22,13 @@ import { paramId } from '../middleware/params.js';
 /**
  * 创建消息路由组
  *
- * @param deps { aiService, aiRateLimiter? } AI 服务与限流中间件（重试也消耗 AI 额度）
+ * @param deps { aiService, summarizer?, aiRateLimiter? }
+ *             AI 服务、语义摘要器与限流中间件（重试也消耗 AI 额度）
  * @returns Router 已装配的 Express Router
  */
 export function createMessagesRouter(deps: {
   aiService: AiService;
+  summarizer?: SemanticSummarizer | null;
   aiRateLimiter?: RateLimiterMiddleware | null;
 }) {
   const router = Router();
@@ -96,7 +99,13 @@ export function createMessagesRouter(deps: {
     ...(deps.aiRateLimiter ? [deps.aiRateLimiter] : []),
     async (req, res) => {
       const user = requireUser(req);
-      const aiMessage = await retryAiMessage(deps.aiService, user.id, user.username, paramId(req));
+      const aiMessage = await retryAiMessage(
+        deps.aiService,
+        user.id,
+        user.username,
+        paramId(req),
+        deps.summarizer,
+      );
       res.json({ aiMessage });
     },
   );

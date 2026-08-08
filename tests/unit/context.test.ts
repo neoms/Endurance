@@ -3,10 +3,11 @@
  *
  * 覆盖：
  * - 阈值以下：原样返回（窗口上限 20）；
- * - 达到阈值（15）：最早部分折叠为摘要放在头部，保留最新 5 条原文；
- * - 超过 20 条时的防御性截断/总结；
+ * - 达到阈值（20，窗口满）：最早 15 条折叠为摘要放在头部，保留最新 5 条原文；
+ * - 超过 20 条时的防御性截断：先收敛到最近 20 条，再压缩前 15 条、保留最新 5 条；
  * - 摘要算法：空白压缩、单条截断、总量预算、条数标注；
- * - 不修改输入数组（纯函数）。
+ * - 注入语义摘要器时使用 AI 摘要（并透传会话作用域），未注入时使用确定性摘要；
+ * - 不修改输入数组。
  */
 import { describe, expect, it } from 'vitest';
 
@@ -34,20 +35,20 @@ function makeMessages(count: number, prefix = 'msg'): AiHistoryMessage[] {
 }
 
 describe('buildContextHistory (滑动窗口)', () => {
-  it('keeps all messages when below the summary threshold', () => {
+  it('keeps all messages when below the summary threshold', async () => {
     const history = makeMessages(SUMMARY_THRESHOLD - 1);
-    const result = buildContextHistory(history);
+    const result = await buildContextHistory(history);
 
     expect(result).toHaveLength(SUMMARY_THRESHOLD - 1);
     expect(result.map((m) => m.content)).toEqual(history.map((m) => m.content));
   });
 
-  it('triggers summary at the threshold: summary head + latest 5 raw messages', () => {
+  it('triggers summary at the threshold: summary head + latest 5 raw messages', async () => {
     const history = makeMessages(SUMMARY_THRESHOLD);
-    const result = buildContextHistory(history);
+    const result = await buildContextHistory(history);
 
     expect(result).toHaveLength(1 + KEEP_RECENT_MESSAGES);
-    // 头部是摘要（system 角色），覆盖最早 (15-5)=10 条
+    // 头部是摘要（system 角色），覆盖最早的 (20-5)=15 条
     expect(result[0]?.role).toBe('system');
     expect(result[0]?.content).toContain(`共 ${SUMMARY_THRESHOLD - KEEP_RECENT_MESSAGES} 条`);
     // 尾部保留最新 5 条原文（msg11 ~ msg15）
@@ -56,23 +57,46 @@ describe('buildContextHistory (滑动窗口)', () => {
     );
   });
 
-  it('summarizes older messages even beyond 20 and keeps the latest 5', () => {
+  it('summarizes older messages even beyond 20 and keeps the latest 5', async () => {
     const history = makeMessages(MAX_CONTEXT_HISTORY + 5);
-    const result = buildContextHistory(history);
+    const result = await buildContextHistory(history);
 
     expect(result).toHaveLength(1 + KEEP_RECENT_MESSAGES);
-    expect(result[0]?.content).toContain(`共 ${MAX_CONTEXT_HISTORY} 条`);
+    // 防御性截断：先收敛到最近 20 条，再压缩前 15 条（不是全部 20 条）
+    expect(result[0]?.content).toContain(`共 ${MAX_CONTEXT_HISTORY - KEEP_RECENT_MESSAGES} 条`);
     expect(result.slice(1).map((m) => m.content)).toEqual(
       history.slice(-KEEP_RECENT_MESSAGES).map((m) => m.content),
     );
   });
 
-  it('does not mutate the input array', () => {
+  it('does not mutate the input array', async () => {
     const history = makeMessages(SUMMARY_THRESHOLD);
     const snapshot = [...history];
-    buildContextHistory(history);
+    await buildContextHistory(history);
 
     expect(history).toEqual(snapshot);
+  });
+
+  it('uses the semantic summarizer result when one is injected', async () => {
+    const history = makeMessages(SUMMARY_THRESHOLD);
+    // 注入假摘要器：断言 buildContextHistory 把「最早 15 条」交给它、
+    // 透传会话作用域，并采用其返回值
+    let receivedScopeId: string | undefined;
+    const fakeSummarizer = {
+      summarize: async (older: AiHistoryMessage[], scopeId?: string) => {
+        receivedScopeId = scopeId;
+        return `AI摘要（${older.length} 条）`;
+      },
+    };
+
+    const result = await buildContextHistory(history, fakeSummarizer, 'conversation-1');
+
+    expect(result[0]?.role).toBe('system');
+    expect(result[0]?.content).toBe(`AI摘要（${SUMMARY_THRESHOLD - KEEP_RECENT_MESSAGES} 条）`);
+    expect(result.slice(1).map((m) => m.content)).toEqual(
+      history.slice(-KEEP_RECENT_MESSAGES).map((m) => m.content),
+    );
+    expect(receivedScopeId).toBe('conversation-1');
   });
 });
 

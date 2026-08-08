@@ -21,6 +21,7 @@ import { Router } from 'express';
 
 import { AiService } from '../../services/ai/ai.service.js';
 import type { AiReplyCache } from '../../services/ai/cache.js';
+import type { SemanticSummarizer } from '../../services/ai/summarizer.js';
 import type { RateLimiterMiddleware } from '../../lib/rate-limit.js';
 import {
   addTagToConversation,
@@ -50,12 +51,14 @@ import {
 /**
  * 创建对话路由组
  *
- * @param deps { aiService, aiCache?, aiRateLimiter? } AI 服务、回复缓存与限流中间件
+ * @param deps { aiService, aiCache?, summarizer?, aiRateLimiter? }
+ *             AI 服务、回复缓存、语义摘要器与限流中间件
  * @returns Router 已装配全部对话相关路由的 Express Router
  */
 export function createConversationsRouter(deps: {
   aiService: AiService;
   aiCache?: AiReplyCache | null;
+  summarizer?: SemanticSummarizer | null;
   aiRateLimiter?: RateLimiterMiddleware | null;
 }) {
   const conversationsRouter = Router();
@@ -545,6 +548,7 @@ export function createConversationsRouter(deps: {
             },
             controller.signal,
             deps.aiCache,
+            deps.summarizer,
           );
         } catch (err) {
           // 首个事件发出前的失败（404 等）：以 error 事件告知前端
@@ -567,6 +571,7 @@ export function createConversationsRouter(deps: {
         user.username,
         req.body,
         deps.aiCache,
+        deps.summarizer,
       );
       res.status(201).json(result);
     },

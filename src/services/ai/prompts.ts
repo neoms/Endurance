@@ -51,6 +51,49 @@ export function buildSystemPrompt(context: AiGenerateContext): string {
 }
 
 /**
+ * 历史消息语义压缩的系统提示词
+ *
+ * 【用途】
+ * 上下文滑动窗口达到总结阈值时（见 context.ts），由 SemanticSummarizer 调用
+ * DeepSeek 把最早部分压缩成语义摘要（替代确定性截断摘要）。
+ *
+ * 【设计要点】
+ * - 明确要求「只输出摘要本身」：避免模型在摘要前后附加解释文字或角色前缀；
+ * - 要求保留关键事实、结论与说话者脉络：语义压缩的意义在于保留确定性算法
+ *   会丢失的「语义关联」；
+ * - 限制摘要长度：控制上下文占用，与确定性摘要的总量预算（800 字符）目的一致；
+ * - 思考模式关闭由 DeepSeekProvider 统一处理（V4 模型显式 thinking.disabled），
+ *   此处不涉及具体服务商。
+ */
+export const SUMMARY_SYSTEM_PROMPT = `你是聊天历史摘要器。请把用户提供的一段多轮对话历史压缩成简洁的中文摘要，要求：
+- 保留关键事实、结论、问题与回答的脉络，以及主要说话者的身份；
+- 用要点式短句概括，不要逐条复述原话，不要遗漏重要转折；
+- 只输出摘要本身，不要任何解释、标题、前缀或引号；
+- 摘要控制在 300 字以内。`;
+
+/**
+ * 历史消息「增量」语义压缩的系统提示词
+ *
+ * 【用途】
+ * 上下文滑动窗口第二次及以后触发时（见 context.ts），上一轮已把较早消息压缩成
+ * 一份摘要。此时不必对全部旧消息重新压缩，只需把「已有摘要 + 新追加的少量消息」
+ * 合并成一份覆盖全部内容的新摘要——输入更小、调用更快、语义连贯。
+ *
+ * 【设计要点】
+ * - 输入固定为「已有摘要 + 新增消息」两段，模型负责把二者融成一份连贯新摘要，
+ *   避免输出「旧摘要 + 追加」的拼接感；
+ * - 输出约束与 SUMMARY_SYSTEM_PROMPT 一致（只输出摘要、控制长度）。
+ */
+export const SUMMARY_INCREMENTAL_SYSTEM_PROMPT = `你是聊天历史摘要器。用户会提供「已有摘要」和「新增的多轮对话消息」：
+- 已有摘要：之前压缩过的早期对话，需要保留其中的关键事实与脉络；
+- 新增消息：已有摘要之后新发生的对话。
+请把两者融合成一份覆盖全部内容的简洁中文摘要，要求：
+- 保留已有摘要中的关键事实、结论与说话者脉络，并纳入新增消息中的新信息；
+- 不要重复已有摘要的原文，也不要把新增消息逐条复述；
+- 用要点式短句概括，只输出融合后的摘要本身，不要任何解释、标题、前缀或引号；
+- 摘要控制在 300 字以内。`;
+
+/**
  * 组装 Chat Completions 的完整 messages（系统提示 + 历史 + 当前用户消息）
  *
  * @param context AI 生成上下文
@@ -65,7 +108,9 @@ export function buildChatMessages(
   context: AiGenerateContext,
 ): Array<{ role: ChatRole; content: string }> {
   const messages: Array<{ role: ChatRole; content: string }> = [
-    { role: 'system', content: buildSystemPrompt(context) },
+    // 允许调用方覆盖系统提示词（如历史摘要任务不需要闲聊人设）；
+    // 缺省时仍按 botName/personality 生成人设提示词
+    { role: 'system', content: context.systemPromptOverride ?? buildSystemPrompt(context) },
   ];
   for (const item of context.history ?? []) {
     messages.push({ role: item.role, content: item.content });

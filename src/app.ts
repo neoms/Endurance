@@ -42,6 +42,7 @@ import { healthRouter } from './routes/health.js';
 import { AiService } from './services/ai/ai.service.js';
 import { AiReplyCache } from './services/ai/cache.js';
 import { createDefaultAiProvider } from './services/ai/provider.factory.js';
+import { SemanticSummarizer } from './services/ai/summarizer.js';
 
 /**
  * 应用构建选项
@@ -74,6 +75,9 @@ export function createApp(options: AppOptions = {}) {
     options.aiService ?? new AiService(createDefaultAiProvider(env.DEEPSEEK_API_KEY));
   // AI 回复缓存：相同问题在 TTL 内直接回放上次回复（个人=单条，群组=整轮 NPC 回复）
   const aiCache = new AiReplyCache(env.AI_CACHE_TTL_MS);
+  // 语义摘要器：仅当配置了 DeepSeek API Key 时启用——用同一 AI 服务对历史消息做
+  // 语义压缩（上下文滑动窗口达到阈值时）；未配置或调用失败时由摘要器降级为确定性摘要
+  const summarizer = env.DEEPSEEK_API_KEY ? new SemanticSummarizer(aiService, aiCache) : null;
 
   // 限流：测试环境默认关闭（避免干扰既有用例），测试可注入自定义限流器验证 429 路径；
   // 生产/开发环境启用——认证按 IP、AI 接口按用户（见 rate-limit.ts）
@@ -119,10 +123,13 @@ export function createApp(options: AppOptions = {}) {
 
   // 业务路由：认证、个人对话、群组、机器人、AI 消息重试、健康检查
   app.use('/api/auth', createAuthRouter({ authRateLimiter }));
-  app.use('/api/conversations', createConversationsRouter({ aiService, aiCache, aiRateLimiter }));
-  app.use('/api/groups', createGroupsRouter({ aiService, aiCache, aiRateLimiter }));
+  app.use(
+    '/api/conversations',
+    createConversationsRouter({ aiService, aiCache, summarizer, aiRateLimiter }),
+  );
+  app.use('/api/groups', createGroupsRouter({ aiService, aiCache, summarizer, aiRateLimiter }));
   app.use('/api/bots', botsRouter);
-  app.use('/api/messages', createMessagesRouter({ aiService, aiRateLimiter }));
+  app.use('/api/messages', createMessagesRouter({ aiService, summarizer, aiRateLimiter }));
   app.use('/api/health', healthRouter);
 
   // 前端静态资源：若 web/dist 已构建（npm run build:web），由 Express 托管，实现一体化部署

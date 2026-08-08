@@ -35,6 +35,7 @@ import { buildContextHistory, MAX_CONTEXT_HISTORY } from './ai/context.js';
 import type { AiService } from './ai/ai.service.js';
 import { cacheKey, type AiReplyCache } from './ai/cache.js';
 import { toAiErrorInfo } from './ai/errors.js';
+import type { SemanticSummarizer } from './ai/summarizer.js';
 import { assertConversationOwnership } from './conversation.service.js';
 
 // 默认标题截断长度（首条用户消息用作标题）
@@ -89,6 +90,8 @@ async function maybeSetDefaultTitle(conversationId: string, content: string): Pr
  * @param conversationId 对话 id
  * @param excludeMessageId 可选：排除某条消息（发送流程用它排除「刚落库的当前消息」，
  *                         避免当前消息在 history 与 content 里重复出现两次）
+ * @param summarizer      可选的语义摘要器（配置了 DeepSeek 时注入；
+ *                         达到总结阈值时对最早部分做语义压缩，失败降级确定性摘要）
  * @returns Promise<Array<{ role, content }>> 供 AI 理解上下文
  * 说明：先取最近 MAX_CONTEXT_HISTORY（20）条，再交给 buildContextHistory
  * 应用滑动窗口/总结（只影响上下文，不影响历史展示）。
@@ -96,6 +99,7 @@ async function maybeSetDefaultTitle(conversationId: string, content: string): Pr
 async function buildHistory(
   conversationId: string,
   excludeMessageId?: string,
+  summarizer?: SemanticSummarizer | null,
 ): Promise<Array<{ role: 'system' | 'user' | 'assistant'; content: string }>> {
   const recent = await prisma.message.findMany({
     where: {
@@ -107,11 +111,14 @@ async function buildHistory(
     take: MAX_CONTEXT_HISTORY,
   });
   const messages = recent.reverse().map((m) => ({
+    // id 供语义摘要器做「增量衔接」（上次摘要覆盖到哪条消息），不进入模型请求
+    id: m.id,
     role: m.senderType === SenderType.HUMAN ? ('user' as const) : ('assistant' as const),
     content: m.content,
   }));
   // 滑动窗口 + 总结：达到阈值时用摘要替换最早部分，保留最近 5 条原文
-  return buildContextHistory(messages);
+  // scopeId = conversationId：让摘要器按会话维护增量状态（满 20 条触发一次）
+  return buildContextHistory(messages, summarizer, conversationId);
 }
 
 /**
@@ -135,6 +142,7 @@ export async function sendMessage(
   userName: string,
   input: SendMessageInput,
   aiCache?: AiReplyCache | null,
+  summarizer?: SemanticSummarizer | null,
 ): Promise<SendMessageResult> {
   // ACL：仅对话所有者可发送消息（锁外快速失败，避免非所有者阻塞在锁队列）
   await assertConversationOwnership(userId, conversationId);
@@ -216,7 +224,7 @@ export async function sendMessage(
       return { userMessage: toMessageOutput(userMessage), aiMessage: toMessageOutput(aiMessage) };
     }
 
-    const history = await buildHistory(conversationId, userMessage.id);
+    const history = await buildHistory(conversationId, userMessage.id, summarizer);
 
     // 第四步：调用 AI（含重试与超时），并按结果落库
     let aiMessage: Message;
@@ -303,6 +311,7 @@ export async function streamSendMessage(
   events: MessageStreamEvents = {},
   clientSignal?: AbortSignal,
   aiCache?: AiReplyCache | null,
+  summarizer?: SemanticSummarizer | null,
 ): Promise<void> {
   // ACL：仅对话所有者可发送消息（锁外快速失败，避免非所有者阻塞在锁队列）
   await assertConversationOwnership(userId, conversationId);
@@ -387,7 +396,7 @@ export async function streamSendMessage(
       return;
     }
 
-    const history = await buildHistory(conversationId, userMessage.id);
+    const history = await buildHistory(conversationId, userMessage.id, summarizer);
 
     // 第三步：AI 回复先以 PENDING 落库占位（拿到稳定消息 id），
     // 流式块到达后再在内存累积，全部完成后一次性更新为 SENT。
@@ -543,6 +552,7 @@ export async function retryAiMessage(
   userId: string,
   userName: string,
   messageId: string,
+  summarizer?: SemanticSummarizer | null,
 ): Promise<MessageOutput> {
   const message = await prisma.message.findUnique({
     where: { id: messageId },
@@ -580,11 +590,14 @@ export async function retryAiMessage(
     orderBy: { createdAt: 'desc' },
     take: MAX_CONTEXT_HISTORY,
   });
-  const contextHistory = buildContextHistory(
+  const contextHistory = await buildContextHistory(
     history.reverse().map((m) => ({
+      id: m.id,
       role: m.senderType === SenderType.HUMAN ? ('user' as const) : ('assistant' as const),
       content: m.content,
     })),
+    summarizer,
+    message.conversationId,
   );
 
   try {

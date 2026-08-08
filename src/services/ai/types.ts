@@ -35,6 +35,8 @@ export interface AiProvider {
  *                       不再写死「你说」）
  * @property history     最近对话历史（role: system/user/assistant，供上下文理解；
  *                       system 角色用于滑动窗口产生的历史摘要，见 context.ts）
+ * @property systemPromptOverride 可选的系统提示词覆盖（用于非闲聊任务，如历史消息
+ *                       语义压缩；缺省时按 botName/personality 自动生成人设提示词）
  */
 export interface AiGenerateContext {
   content: string;
@@ -42,6 +44,7 @@ export interface AiGenerateContext {
   personality?: string;
   userName?: string;
   history?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  systemPromptOverride?: string;
 }
 
 /**

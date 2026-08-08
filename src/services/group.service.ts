@@ -58,6 +58,7 @@ import type {
 import { buildContextHistory, MAX_CONTEXT_HISTORY } from './ai/context.js';
 import type { AiService } from './ai/ai.service.js';
 import { cacheKey, type AiReplyCache } from './ai/cache.js';
+import type { SemanticSummarizer } from './ai/summarizer.js';
 
 // 机器人生成失败时的兜底文案（保证人类消息后必有回复）
 const FALLBACK_REPLY = '我暂时无法回答，请稍后再试。';
@@ -658,6 +659,8 @@ export async function removeBotFromGroup(
  * @param groupId 群组 id
  * @param excludeMessageId 可选：排除某条消息（发送流程用它排除「刚落库的当前人类消息」，
  *                         避免当前消息在 history 与 content 里重复出现两次）
+ * @param summarizer 可选的语义摘要器（配置了 DeepSeek 时注入；
+ *                   达到总结阈值时对最早部分做语义压缩，失败降级确定性摘要）
  * @returns Promise<Array<{ role, content }>> 上下文历史（时间升序，已应用滑动窗口/总结）
  * 说明：
  * - 真人消息带「用户名：」前缀、机器人消息带「机器人名：」前缀——
@@ -669,6 +672,7 @@ export async function removeBotFromGroup(
 async function buildGroupHistory(
   groupId: string,
   excludeMessageId?: string,
+  summarizer?: SemanticSummarizer | null,
 ): Promise<Array<{ role: 'system' | 'user' | 'assistant'; content: string }>> {
   const recent = await prisma.groupMessage.findMany({
     where: { groupId, ...(excludeMessageId ? { id: { not: excludeMessageId } } : {}) },
@@ -684,6 +688,8 @@ async function buildGroupHistory(
       // 真人历史消息：带用户名前缀（与当前消息的「用户名：」前缀保持一致）
       const name = m.user?.username ?? m.user?.displayName;
       return {
+        // id 供语义摘要器做「增量衔接」（上次摘要覆盖到哪条消息），不进入模型请求
+        id: m.id,
         role: 'user' as const,
         content: name ? `${name}：${m.content}` : m.content,
       };
@@ -691,6 +697,7 @@ async function buildGroupHistory(
     // 机器人历史消息：带机器人名前缀（需求：群组历史机器人发言加名字前缀）
     const botName = m.bot?.name;
     return {
+      id: m.id,
       role: 'assistant' as const,
       // 先剥掉存量内容里可能残留的「NPC 名」前缀（历史数据/旧版本可能已带前缀），
       // 再统一拼一次「名字：」——避免双重前缀进入上下文、模型模仿出多重前缀
@@ -698,7 +705,8 @@ async function buildGroupHistory(
     };
   });
   // 滑动窗口 + 总结：达到阈值时用摘要替换最早部分，保留最近 5 条原文
-  return buildContextHistory(messages);
+  // scopeId = groupId：让摘要器按会话维护增量状态（满 20 条触发一次）
+  return buildContextHistory(messages, summarizer, groupId);
 }
 
 /**
@@ -732,6 +740,7 @@ export async function sendGroupMessage(
   groupId: string,
   input: { content: string; clientRequestId?: string },
   aiCache?: AiReplyCache | null,
+  summarizer?: SemanticSummarizer | null,
 ): Promise<SendGroupMessageResult> {
   // ACL：仅群组成员可发消息
   await assertGroupAccess(userId, groupId);
@@ -878,7 +887,7 @@ export async function sendGroupMessage(
       };
     }
 
-    const history = await buildGroupHistory(groupId, userMessage.id);
+    const history = await buildGroupHistory(groupId, userMessage.id, summarizer);
 
     const botMessages: GroupMessageOutput[] = [];
     // 本轮各 NPC 的成功回复（整轮全部成功才写缓存，任一走兜底则整轮不缓存）
@@ -990,6 +999,7 @@ export async function streamSendGroupMessage(
   events: GroupMessageStreamEvents = {},
   clientSignal?: AbortSignal,
   aiCache?: AiReplyCache | null,
+  summarizer?: SemanticSummarizer | null,
 ): Promise<void> {
   // ACL：仅群组成员可发消息
   await assertGroupAccess(userId, groupId);
@@ -1123,7 +1133,7 @@ export async function streamSendGroupMessage(
       return;
     }
 
-    const history = await buildGroupHistory(groupId, userMessage.id);
+    const history = await buildGroupHistory(groupId, userMessage.id, summarizer);
     // 实际发言成员的用户名（Mock AI 回显「用户名说：」；ACL 保证发送者必然是成员）
     const senderName = group.members.find((m) => m.userId === userId)?.user.username ?? '用户';
 
