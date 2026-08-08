@@ -3,6 +3,7 @@
  *
  * 【交互】
  * - 左侧：群组信息（成员管理、机器人管理、离开群组）；
+ * - 左侧（创建者）：群组设置（名称/响应策略/每轮回复上限，保存调 PATCH）；
  * - 右侧：群聊窗口（人类/机器人发言，发送消息触发机器人回复）；
  * - 成员可离开群组；创建者可添加/移除成员与机器人。
  */
@@ -28,6 +29,13 @@ export default function GroupDetailPage() {
   const [error, setError] = useState('');
   const [addUserId, setAddUserId] = useState('');
   const [addBotId, setAddBotId] = useState('');
+  // 群组设置编辑表单（仅创建者可见）
+  const [editName, setEditName] = useState('');
+  const [editResponseMode, setEditResponseMode] = useState<
+    'ALL_BOTS' | 'RANDOM_ONE' | 'CONTENT_ROUTED'
+  >('ALL_BOTS');
+  const [editMaxReplies, setEditMaxReplies] = useState(3);
+  const [savingConfig, setSavingConfig] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   // 当前待发送消息的幂等键：发送失败后保留，重试同一条消息时后端去重；
   // 发送成功或用户修改输入后清空（幂等键只对同一条消息有效）
@@ -58,6 +66,15 @@ export default function GroupDetailPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 群组加载/更新后同步编辑表单（避免修改后显示旧值）
+  useEffect(() => {
+    if (group) {
+      setEditName(group.name);
+      setEditResponseMode(group.responseMode);
+      setEditMaxReplies(group.maxConsecutiveBotReplies);
+    }
+  }, [group]);
 
   /**
    * 加载更早的群组历史消息（before = 当前最早一条消息的 id，结果前插）
@@ -180,6 +197,33 @@ export default function GroupDetailPage() {
     navigate('/groups');
   };
 
+  /**
+   * 保存群组设置（仅创建者；后端越权返回 403）
+   *
+   * 说明：一次性提交名称/响应策略/每轮回复上限三个字段，
+   * 与后端 PATCH /api/groups/:id 的校验规则一致（名称 1-50、上限 1-10）。
+   */
+  const saveConfig = async () => {
+    if (!id || !editName.trim() || savingConfig) return;
+    setSavingConfig(true);
+    setError('');
+    try {
+      await api(`/groups/${id}`, {
+        method: 'PATCH',
+        body: {
+          name: editName.trim(),
+          responseMode: editResponseMode,
+          maxConsecutiveBotReplies: editMaxReplies,
+        },
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '保存失败');
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-header">
@@ -257,6 +301,47 @@ export default function GroupDetailPage() {
               策略：{group?.responseMode} · 每轮上限：{group?.maxConsecutiveBotReplies}
             </div>
           </div>
+
+          {isOwner && (
+            <div className="card">
+              <h4 style={{ marginTop: 0 }}>群组设置</h4>
+              <div className="field">
+                <label htmlFor="groupNameEdit">名称（1-50）</label>
+                <input
+                  id="groupNameEdit"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  maxLength={50}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="responseModeEdit">响应策略</label>
+                <select
+                  id="responseModeEdit"
+                  value={editResponseMode}
+                  onChange={(e) => setEditResponseMode(e.target.value as typeof editResponseMode)}
+                >
+                  <option value="ALL_BOTS">全部机器人回复</option>
+                  <option value="RANDOM_ONE">随机一个回复</option>
+                  <option value="CONTENT_ROUTED">按内容路由</option>
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="maxRepliesEdit">每轮回复上限（1-10）</label>
+                <input
+                  id="maxRepliesEdit"
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={editMaxReplies}
+                  onChange={(e) => setEditMaxReplies(Number(e.target.value))}
+                />
+              </div>
+              <button onClick={() => void saveConfig()} disabled={savingConfig || !editName.trim()}>
+                {savingConfig ? '保存中…' : '保存设置'}
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="card chat-window">

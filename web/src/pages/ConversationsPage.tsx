@@ -20,6 +20,8 @@ export default function ConversationsPage() {
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [filterTags, setFilterTags] = useState<string[]>([]);
+  // 标签全集（独立于当前筛选结果，用于筛选 chips 展示）
+  const [allTags, setAllTags] = useState<string[]>([]);
   const [newTitle, setNewTitle] = useState('');
   const [error, setError] = useState('');
 
@@ -33,6 +35,15 @@ export default function ConversationsPage() {
         `/conversations${query ? `?${query}` : ''}`,
       );
       setConversations(res.conversations);
+      // 标签全集推导：无筛选时直接复用本次结果；有筛选时额外拉取一次全量列表，
+      // 保证筛选 chips 始终展示用户全部标签（不受当前筛选结果影响）。
+      let tagSource = res;
+      if (filterTags.length > 0) {
+        tagSource = await api<{ conversations: Conversation[] }>('/conversations');
+      }
+      setAllTags(
+        Array.from(new Set(tagSource.conversations.flatMap((c) => c.tags.map((t) => t.name)))),
+      );
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '加载失败');
     }
@@ -41,9 +52,6 @@ export default function ConversationsPage() {
   useEffect(() => {
     void load();
   }, [load]);
-
-  // 从当前列表推导全部标签（用于筛选 chips 展示）
-  const allTags = Array.from(new Set(conversations.flatMap((c) => c.tags.map((t) => t.name))));
 
   /**
    * 切换标签筛选（多选，AND 语义）
