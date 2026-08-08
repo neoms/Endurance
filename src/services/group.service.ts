@@ -32,6 +32,7 @@ import {
 import { randomUUID } from 'node:crypto';
 
 import { AppError } from '../lib/errors.js';
+import { createKeyedLock } from '../lib/locks.js';
 import { logger } from '../lib/logger.js';
 import { prisma } from '../lib/prisma.js';
 import type {
@@ -48,34 +49,8 @@ const FALLBACK_REPLY = '我暂时无法回答，请稍后再试。';
 // 提供给机器人的上下文消息条数
 const GROUP_HISTORY_SIZE = 10;
 
-// 群组级 in-flight 锁：同一群组同时只允许一个生成轮次
-const groupLocks = new Map<string, Promise<void>>();
-
-/**
- * 群组级互斥锁
- *
- * @param groupId 群组 id
- * @param task    需要串行执行的任务
- * @returns Promise<T> 任务结果（等待前一个轮次完成后执行）
- * 说明：通过 Promise 链让同一群组的轮次排队执行，避免并发超发机器人回复。
- */
-async function withGroupLock<T>(groupId: string, task: () => Promise<T>): Promise<T> {
-  const previous = groupLocks.get(groupId) ?? Promise.resolve();
-  // 无论前一个轮次成败，都继续执行当前任务
-  const run = previous.then(task, task);
-  const tail = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  groupLocks.set(groupId, tail);
-  // 轮次结束后清理锁（仅当仍是自己的尾 Promise 时删除）
-  void tail.then(() => {
-    if (groupLocks.get(groupId) === tail) {
-      groupLocks.delete(groupId);
-    }
-  });
-  return run;
-}
+// 群组级 in-flight 锁：同一群组同时只允许一个生成轮次（复用共享键级锁工具）
+const groupLocks = createKeyedLock();
 
 /**
  * 判断消息内容是否命中机器人的关键词倾向
@@ -522,7 +497,7 @@ export async function sendGroupMessage(
   // ACL：仅群组成员可发消息
   await assertGroupAccess(userId, groupId);
 
-  return withGroupLock(groupId, async () => {
+  return groupLocks(groupId, async () => {
     // 锁内读取群组配置与机器人（保证与轮次执行一致）
     const group = await prisma.chatGroup.findUnique({
       where: { id: groupId },

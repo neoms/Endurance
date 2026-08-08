@@ -11,7 +11,10 @@
  *    限定在已通过所有权校验的对话内，避免跨用户/跨对话误命中造成数据泄露或丢失；
  * 5. 对话仍为默认标题（isDefaultTitle=true）时，首条用户消息（超长截断）自动设为标题，
  *    并立刻把标记置为 false——用户手动设置过的标题永不覆盖；
- * 6. 用户消息落库后同步刷新 conversation.updatedAt，使对话列表按「最近活跃」排序。
+ * 6. 用户消息落库后同步刷新 conversation.updatedAt，使对话列表按「最近活跃」排序；
+ * 7. 对话级串行化：同一对话的「幂等检查 + 落库 + AI 调用」在互斥锁内执行——
+ *    并发提交相同 clientRequestId 时，后者在锁内命中首次结果（不再撞唯一约束 500）；
+ *    并发提交不同消息时回复按轮次顺序落库，多轮上下文不被并发污染。
  *
  * 【ACL】
  * 所有操作都经过 assertConversationOwnership（跨用户访问 404）或消息归属校验。
@@ -19,6 +22,7 @@
 import { MessageStatus, SenderType, type Message } from '@prisma/client';
 
 import { AppError } from '../lib/errors.js';
+import { createKeyedLock } from '../lib/locks.js';
 import { logger } from '../lib/logger.js';
 import { prisma } from '../lib/prisma.js';
 import type {
@@ -35,6 +39,8 @@ import { assertConversationOwnership } from './conversation.service.js';
 const MAX_TITLE_LENGTH = 30;
 // 提供给 AI 的上下文消息条数
 const HISTORY_SIZE = 10;
+// 对话级互斥锁：同一对话同时只允许一个「发送轮次」执行（见文件头第 7 条设计说明）
+const conversationLocks = createKeyedLock();
 
 /**
  * 序列化：数据库消息模型 → 对外输出结构
@@ -108,6 +114,7 @@ async function buildHistory(
  * @throws AppError(404) 对话不存在或不属于当前用户
  * 主要逻辑：ACL 校验 → 幂等检查 → 用户消息落库 → 设置默认标题 → 构建上下文
  * → 调用 AI（成功 SENT / 失败 FAILED 占位）→ 返回两条消息。
+ * 其中「锁内确认之后的全部步骤」都在对话级锁内执行，保证同一对话的写入串行。
  */
 export async function sendMessage(
   aiService: AiService,
@@ -115,92 +122,103 @@ export async function sendMessage(
   conversationId: string,
   input: SendMessageInput,
 ): Promise<SendMessageResult> {
-  // ACL：仅对话所有者可发送消息
+  // ACL：仅对话所有者可发送消息（锁外快速失败，避免非所有者阻塞在锁队列）
   await assertConversationOwnership(userId, conversationId);
-  const content = input.content.trim();
 
-  // 幂等：以「对话 + clientRequestId」复合键查找（唯一约束见 schema）。
-  // 对话 id 已通过上面的所有权校验，因此命中记录必属于当前用户，杜绝跨用户泄露；
-  // 命中时直接返回首次结果，不重复生成，避免客户端重复提交产生重复消息。
-  if (input.clientRequestId) {
-    const existing = await prisma.message.findUnique({
-      where: {
-        conversationId_clientRequestId: {
-          conversationId,
-          clientRequestId: input.clientRequestId,
+  return conversationLocks(conversationId, async () => {
+    // 锁内再次确认对话存在且属于当前用户：防止「锁外校验后对话被并发删除」的竞态
+    const alive = await prisma.conversation.findFirst({
+      where: { id: conversationId, userId },
+      select: { id: true },
+    });
+    if (!alive) {
+      throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversation not found');
+    }
+
+    const content = input.content.trim();
+
+    // 幂等：以「对话 + clientRequestId」复合键查找（唯一约束见 schema）。
+    // 锁内检查保证并发重复提交时，第二个请求必然看到首次结果，返回幂等响应。
+    if (input.clientRequestId) {
+      const existing = await prisma.message.findUnique({
+        where: {
+          conversationId_clientRequestId: {
+            conversationId,
+            clientRequestId: input.clientRequestId,
+          },
         },
+      });
+      if (existing) {
+        const existingAi = await prisma.message.findFirst({
+          where: {
+            conversationId,
+            senderType: SenderType.BOT,
+            createdAt: { gt: existing.createdAt },
+          },
+          orderBy: { createdAt: 'asc' },
+        });
+        logger.debug({ clientRequestId: input.clientRequestId }, 'message: idempotent hit');
+        return {
+          userMessage: toMessageOutput(existing),
+          aiMessage: existingAi ? toMessageOutput(existingAi) : null,
+        };
+      }
+    }
+
+    // 第一步：用户消息立即落库（即使 AI 失败也不丢失）
+    const userMessage = await prisma.message.create({
+      data: {
+        conversationId,
+        senderType: SenderType.HUMAN,
+        senderUserId: userId,
+        content,
+        status: MessageStatus.SENT,
+        clientRequestId: input.clientRequestId,
       },
     });
-    if (existing) {
-      const existingAi = await prisma.message.findFirst({
-        where: {
+
+    // 第二步：若仍为默认标题则替换为首条消息，并刷新对话 updatedAt（列表按最近活跃排序）
+    await maybeSetDefaultTitle(conversationId, content);
+    await prisma.conversation.update({
+      where: { id: conversationId },
+      data: { updatedAt: new Date() },
+    });
+    const history = await buildHistory(conversationId);
+
+    // 第三步：调用 AI（含重试与超时），并按结果落库
+    let aiMessage: Message;
+    try {
+      const reply = await aiService.generateWithRetry({ content, history });
+      aiMessage = await prisma.message.create({
+        data: {
           conversationId,
           senderType: SenderType.BOT,
-          createdAt: { gt: existing.createdAt },
+          content: reply,
+          status: MessageStatus.SENT,
         },
-        orderBy: { createdAt: 'asc' },
       });
-      logger.debug({ clientRequestId: input.clientRequestId }, 'message: idempotent hit');
-      return {
-        userMessage: toMessageOutput(existing),
-        aiMessage: existingAi ? toMessageOutput(existingAi) : null,
-      };
+      logger.info({ userId, conversationId, aiMessageId: aiMessage.id }, 'message: ai reply saved');
+    } catch (err) {
+      // 重试耗尽：以 FAILED 占位并记录错误信息，保证对话数据一致
+      const info = toAiErrorInfo(err);
+      aiMessage = await prisma.message.create({
+        data: {
+          conversationId,
+          senderType: SenderType.BOT,
+          content: '',
+          status: MessageStatus.FAILED,
+          errorCode: info.code,
+          errorMessage: info.message,
+        },
+      });
+      logger.error(
+        { userId, conversationId, aiMessageId: aiMessage.id, errorCode: info.code },
+        'message: ai reply failed after retries',
+      );
     }
-  }
 
-  // 第一步：用户消息立即落库（即使 AI 失败也不丢失）
-  const userMessage = await prisma.message.create({
-    data: {
-      conversationId,
-      senderType: SenderType.HUMAN,
-      senderUserId: userId,
-      content,
-      status: MessageStatus.SENT,
-      clientRequestId: input.clientRequestId,
-    },
+    return { userMessage: toMessageOutput(userMessage), aiMessage: toMessageOutput(aiMessage) };
   });
-
-  // 第二步：若仍为默认标题则替换为首条消息，并刷新对话 updatedAt（列表按最近活跃排序）
-  await maybeSetDefaultTitle(conversationId, content);
-  await prisma.conversation.update({
-    where: { id: conversationId },
-    data: { updatedAt: new Date() },
-  });
-  const history = await buildHistory(conversationId);
-
-  // 第三步：调用 AI（含重试与超时），并按结果落库
-  let aiMessage: Message;
-  try {
-    const reply = await aiService.generateWithRetry({ content, history });
-    aiMessage = await prisma.message.create({
-      data: {
-        conversationId,
-        senderType: SenderType.BOT,
-        content: reply,
-        status: MessageStatus.SENT,
-      },
-    });
-    logger.info({ userId, conversationId, aiMessageId: aiMessage.id }, 'message: ai reply saved');
-  } catch (err) {
-    // 重试耗尽：以 FAILED 占位并记录错误信息，保证对话数据一致
-    const info = toAiErrorInfo(err);
-    aiMessage = await prisma.message.create({
-      data: {
-        conversationId,
-        senderType: SenderType.BOT,
-        content: '',
-        status: MessageStatus.FAILED,
-        errorCode: info.code,
-        errorMessage: info.message,
-      },
-    });
-    logger.error(
-      { userId, conversationId, aiMessageId: aiMessage.id, errorCode: info.code },
-      'message: ai reply failed after retries',
-    );
-  }
-
-  return { userMessage: toMessageOutput(userMessage), aiMessage: toMessageOutput(aiMessage) };
 }
 
 /**

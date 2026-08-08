@@ -349,6 +349,59 @@ describe('messages API', () => {
     expect(second.body.userMessage.id).not.toBe(first.body.userMessage.id);
   });
 
+  it('handles concurrent duplicate submissions idempotently (no 500)', async () => {
+    const { token } = await registerUser(app, 'concurrenter');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+    const payload = { content: '并发重复', clientRequestId: 'race-req-000001' };
+
+    // 两个请求并发携带同一幂等键：对话级锁保证串行，第二个请求返回首次结果
+    const [r1, r2] = await Promise.all([
+      request(app).post(`/api/conversations/${id}/messages`).set(auth(token)).send(payload),
+      request(app).post(`/api/conversations/${id}/messages`).set(auth(token)).send(payload),
+    ]);
+
+    expect(r1.status).toBe(201);
+    expect(r2.status).toBe(201);
+    expect(r2.body.userMessage.id).toBe(r1.body.userMessage.id);
+
+    // 只落库一条用户消息 + 一条 AI 回复
+    const list = await request(app).get(`/api/conversations/${id}/messages`).set(auth(token));
+    expect(list.body.messages).toHaveLength(2);
+  });
+
+  it('serializes concurrent sends per conversation (contiguous turn ordering)', async () => {
+    const { token } = await registerUser(app, 'serialuser');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    await Promise.all([
+      request(app)
+        .post(`/api/conversations/${id}/messages`)
+        .set(auth(token))
+        .send({ content: '甲' }),
+      request(app)
+        .post(`/api/conversations/${id}/messages`)
+        .set(auth(token))
+        .send({ content: '乙' }),
+      request(app)
+        .post(`/api/conversations/${id}/messages`)
+        .set(auth(token))
+        .send({ content: '丙' }),
+    ]);
+
+    const list = await request(app).get(`/api/conversations/${id}/messages`).set(auth(token));
+    // 对话级锁保证每一轮 HUMAN+BOT 连续落库，不会出现 HUMAN,HUMAN,BOT,BOT 交错
+    expect(list.body.messages.map((m: { senderType: string }) => m.senderType)).toEqual([
+      'HUMAN',
+      'BOT',
+      'HUMAN',
+      'BOT',
+      'HUMAN',
+      'BOT',
+    ]);
+  });
+
   it('rejects empty content with 422', async () => {
     const { token } = await registerUser(app, 'msguser');
     const conv = await createConversation(app, token);
