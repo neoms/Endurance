@@ -9,8 +9,9 @@
  * - 历史消息按时间顺序返回；
  * - clientRequestId 幂等去重；
  * - 幂等键按对话隔离：跨用户复用不泄露他人消息、同用户跨对话互不影响；
+ * - 分页：默认返回最近消息、before 加载更早、无效游标 400；
  * - 空内容 422；跨用户发送/查看 404；
- * - AI 持续失败 → FAILED 占位 + retry 恢复；
+ * - AI 持续失败 → FAILED 占位 + retry 恢复（重试携带对话历史上下文）；
  * - retry 的 409 场景（SENT 消息 / 人类消息）与跨用户 404。
  */
 import request from 'supertest';
@@ -20,11 +21,32 @@ import { createApp } from '../../src/app.js';
 import { prisma } from '../../src/lib/prisma.js';
 import { AiService } from '../../src/services/ai/ai.service.js';
 import { MockAiProvider } from '../../src/services/ai/mock.provider.js';
+import type {
+  AiGenerateContext,
+  AiGenerateResult,
+  AiProvider,
+} from '../../src/services/ai/types.js';
 import { auth, createConversation, registerUser } from '../helpers.js';
 
 // 正常应用（AI 成功）与故障应用（AI 必然失败，用于失败一致性测试）
 const app = createApp();
 const failingApp = createApp({ aiService: new AiService(new MockAiProvider({ failTimes: 99 })) });
+
+/**
+ * 记录调用上下文的 Provider（测试重试是否携带多轮历史）
+ */
+class RecordingProvider implements AiProvider {
+  readonly name = 'recording';
+  calls: Array<{
+    content: string;
+    history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  }> = [];
+
+  async generate(context: AiGenerateContext): Promise<AiGenerateResult> {
+    this.calls.push({ content: context.content, history: context.history ?? [] });
+    return { content: '重试成功' };
+  }
+}
 
 describe('messages API', () => {
   // 每个用例前清空用户表（级联清空其名下数据），保证用例相互独立
@@ -129,6 +151,89 @@ describe('messages API', () => {
     const after = (await request(app).get(`/api/conversations/${id}`).set(auth(token))).body
       .conversation.updatedAt as string;
     expect(new Date(after).getTime()).toBeGreaterThan(new Date(before).getTime());
+  });
+
+  it('paginates history: newest page by default, before loads older, invalid anchors 400', async () => {
+    const { token } = await registerUser(app, 'pageuser');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    // 直接向数据库插入 5 条人类消息（绕过 AI，专注验证分页语义）
+    for (let i = 1; i <= 5; i += 1) {
+      await prisma.message.create({
+        data: {
+          conversationId: id,
+          senderType: 'HUMAN',
+          content: `m${i}`,
+          status: 'SENT',
+        },
+      });
+    }
+
+    // 默认（无 cursor/before）：返回最近 2 条，升序
+    const newest = await request(app)
+      .get(`/api/conversations/${id}/messages?limit=2`)
+      .set(auth(token));
+    expect(newest.status).toBe(200);
+    expect(newest.body.messages.map((m: { content: string }) => m.content)).toEqual(['m4', 'm5']);
+
+    // before=m4：返回 m4 之前的 2 条
+    const m4Id = newest.body.messages[0].id as string;
+    const older = await request(app)
+      .get(`/api/conversations/${id}/messages?before=${m4Id}&limit=2`)
+      .set(auth(token));
+    expect(older.body.messages.map((m: { content: string }) => m.content)).toEqual(['m2', 'm3']);
+
+    // 继续 before=m2：只剩 m1
+    const m2Id = older.body.messages[0].id as string;
+    const oldest = await request(app)
+      .get(`/api/conversations/${id}/messages?before=${m2Id}&limit=2`)
+      .set(auth(token));
+    expect(oldest.body.messages.map((m: { content: string }) => m.content)).toEqual(['m1']);
+
+    // 无效游标/锚点（不存在或不属于该对话）→ 400 INVALID_CURSOR
+    const badBefore = await request(app)
+      .get(`/api/conversations/${id}/messages?before=not-a-real-id`)
+      .set(auth(token));
+    const badCursor = await request(app)
+      .get(`/api/conversations/${id}/messages?cursor=not-a-real-id`)
+      .set(auth(token));
+    expect(badBefore.status).toBe(400);
+    expect(badBefore.body.error.code).toBe('INVALID_CURSOR');
+    expect(badCursor.status).toBe(400);
+    expect(badCursor.body.error.code).toBe('INVALID_CURSOR');
+  });
+
+  it('retries a failed AI message with prior conversation history', async () => {
+    const provider = new RecordingProvider();
+    const retryApp = createApp({ aiService: new AiService(provider) });
+    const { token } = await registerUser(app, 'retryctx');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    // 第一轮正常发送；第二轮用故障应用发送（AI 重试耗尽 → FAILED）
+    await request(app)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '第一问' });
+    const failed = await request(failingApp)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '第二问' });
+    expect(failed.body.aiMessage.status).toBe('FAILED');
+
+    // 用记录型 Provider 重试：应携带失败消息之前的对话历史
+    const retry = await request(retryApp)
+      .post(`/api/messages/${failed.body.aiMessage.id}/retry`)
+      .set(auth(token));
+    expect(retry.status).toBe(200);
+
+    expect(provider.calls).toHaveLength(1);
+    const ctx = provider.calls[0]!;
+    expect(ctx.content).toBe('第二问');
+    // 历史 = 第一问(user) + AI 回复(assistant) + 第二问(user)，按时间升序
+    expect(ctx.history.map((h) => h.role)).toEqual(['user', 'assistant', 'user']);
+    expect(ctx.history.map((h) => h.content)).toEqual(expect.arrayContaining(['第一问', '第二问']));
   });
 
   it('lists messages in chronological order', async () => {

@@ -38,11 +38,13 @@ export interface SendMessageInput {
 /**
  * 历史消息分页查询参数
  *
- * @property cursor 游标（上一页最后一条消息的 id）；省略表示第一页
- * @property limit  每页条数（1-100，默认 50）
+ * @property cursor 正向游标：返回该消息之后的 limit 条（升序），用于向下翻页
+ * @property before 反向锚点：返回该消息之前的 limit 条（升序），用于聊天页「加载更早」
+ * @property limit  每页条数（1-100，默认 50）；cursor 与 before 都省略时返回最近 limit 条
  */
 export interface ListMessagesQuery {
   cursor?: string;
+  before?: string;
   limit: number;
 }
 

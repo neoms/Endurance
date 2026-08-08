@@ -4,7 +4,8 @@
  * 【健壮性设计】
  * - 总尝试次数 = maxRetries + 1（默认 3 次，即首次 + 2 次重试）；
  * - 指数退避（300ms → 600ms …）并附加随机抖动，避免重试风暴；
- * - 每个请求通过 withTimeout 强制超时（默认 10s），超时按可重试错误处理；
+ * - 每个请求通过 withTimeout 强制超时（默认 10s）：超时触发 AbortController.abort()
+ *   真正取消底层调用（Provider 应监听 signal 尽快中断），同时按可重试错误处理；
  * - 仅对可重试错误（超时/网络/5xx 类）重试，4xx 直接终止；
  * - 每次失败与重试均记录结构化日志（attempt、延迟、错误），便于问题排查。
  */
@@ -41,7 +42,11 @@ export class AiService {
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
         // 统一超时包装：底层 Provider 超时未返回也按 AI_TIMEOUT 处理
-        const result = await withTimeout(this.provider.generate(context, { timeoutMs }), timeoutMs);
+        // 统一超时包装：把 AbortSignal 传给 Provider，超时后真正取消底层调用
+        const result = await withTimeout(
+          (signal) => this.provider.generate(context, { timeoutMs, signal }),
+          timeoutMs,
+        );
         logger.debug({ provider: this.provider.name, attempt }, 'ai: generation succeeded');
         return result.content;
       } catch (err) {
@@ -70,17 +75,21 @@ export class AiService {
 /**
  * 超时包装
  *
- * @param promise   底层调用 Promise
+ * @param call      接收 AbortSignal 的底层调用工厂
  * @param timeoutMs 超时阈值（毫秒）
  * @returns Promise<T> 结果；超时则以 AI_TIMEOUT（可重试）拒绝
- * 说明：底层 Promise 仍会继续执行，但结果被忽略（不会产生未处理拒绝）。
+ * 说明：超时后立即 abort 底层调用（Provider 应监听 signal 中断），
+ * 同时通过 Promise 竞速兜底：即使 Provider 不监听 signal 也不会挂起，
+ * 只会忽略迟到的结果（不会产生未处理拒绝）。
  */
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+function withTimeout<T>(call: (signal: AbortSignal) => Promise<T>, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
+      controller.abort();
       reject(new AiError('AI request timed out', 'AI_TIMEOUT', true));
     }, timeoutMs);
-    promise.then(
+    call(controller.signal).then(
       (value) => {
         clearTimeout(timer);
         resolve(value);

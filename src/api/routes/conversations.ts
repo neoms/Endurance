@@ -493,15 +493,17 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
   /**
    * GET /api/conversations/{id}/messages 历史消息（游标分页）
    *
-   * 查询参数：cursor（上一页最后一条消息 id）、limit（1-100，默认 50）；
-   * 返回值：200 { messages }（按时间升序）。
+   * 查询参数：cursor（正向翻页）、before（反向加载更早）、limit（1-100，默认 50）；
+   * 返回值：200 { messages }（按时间升序）。cursor/before 都省略时返回最近 limit 条。
    *
    * @openapi
    * /api/conversations/{id}/messages:
    *   get:
    *     tags: [Messages]
    *     summary: 对话历史消息（游标分页）
-   *     description: 按时间升序返回对话内全部消息（人类与 AI 发言）；支持游标分页。
+   *     description: 按时间升序返回对话内消息（人类与 AI 发言，含 FAILED 占位）。
+   *       默认返回最近 limit 条；`before` 返回该消息之前的消息（聊天页「加载更早」）；
+   *       `cursor` 返回该消息之后的消息（正向翻页）。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -514,7 +516,13 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
    *       - name: cursor
    *         in: query
    *         required: false
-   *         description: 游标（上一页最后一条消息的 id），省略表示第一页
+   *         description: 正向游标：返回该消息之后（不含）的 limit 条
+   *         schema:
+   *           type: string
+   *       - name: before
+   *         in: query
+   *         required: false
+   *         description: 反向锚点：返回该消息之前（不含）的 limit 条
    *         schema:
    *           type: string
    *       - name: limit
@@ -541,6 +549,12 @@ export function createConversationsRouter(deps: { aiService: AiService }) {
    *               $ref: '#/components/schemas/ErrorResponse'
    *       '404':
    *         description: 对话不存在或不属于当前用户
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   *       '400':
+   *         description: cursor/before 不是该对话内的消息
    *         content:
    *           application/json:
    *             schema:

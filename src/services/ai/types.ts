@@ -34,9 +34,11 @@ export interface AiGenerateContext {
  * 单次生成选项
  *
  * @property timeoutMs 单次调用超时（毫秒）
+ * @property signal    取消信号：超时后由 AiService 触发 abort，Provider 应尽快中断
  */
 export interface AiGenerateOptions {
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 /**

@@ -5,6 +5,8 @@
  * 在没有真实 AI API 的情况下模拟回复，保证演示与测试稳定：
  * - echo：回显用户消息（默认，便于展示「多轮问答」效果）；
  * - random：从固定话术库随机回复。
+ * - 支持取消：监听 options.signal，被 abort（如 AiService 超时）时立即抛出可重试错误，
+ *   避免底层调用悬挂。
  *
  * 【测试支持】
  * - failTimes：前 N 次调用抛可重试错误（验证重试/失败标记逻辑）；
@@ -57,11 +59,19 @@ export class MockAiProvider implements AiProvider {
    */
   async generate(
     context: AiGenerateContext,
-    _options?: AiGenerateOptions,
+    options?: AiGenerateOptions,
   ): Promise<AiGenerateResult> {
+    // 已被取消（如超时触发的 abort）：立即抛出，不再执行
+    if (options?.signal?.aborted) {
+      throw new AiError('AI request aborted', 'AI_ABORTED', true);
+    }
     // 模拟网络延迟
     if (this.options.delayMs) {
-      await sleep(this.options.delayMs);
+      await sleep(this.options.delayMs, options?.signal);
+    }
+    // 延迟期间被取消：同样立即抛出（信号可能在 sleep 中触发）
+    if (options?.signal?.aborted) {
+      throw new AiError('AI request aborted', 'AI_ABORTED', true);
     }
     // 故障注入：前 failTimes 次调用抛出可重试错误
     if (this.failureCount < (this.options.failTimes ?? 0)) {
@@ -82,9 +92,30 @@ export class MockAiProvider implements AiProvider {
 /**
  * 延时工具
  *
- * @param ms 毫秒数
- * @returns Promise<void> 到点后 resolve
+ * @param ms     毫秒数
+ * @param signal 可选取消信号：被 abort 时立即以可重试错误拒绝
+ * @returns Promise<void> 到点后 resolve；被取消时 reject
  */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+
+    // 函数声明提升：setTimeout 回调中引用 onAbort 是安全的（回调总是晚于声明执行）
+    function onAbort() {
+      clearTimeout(timer);
+      reject(new AiError('AI request aborted', 'AI_ABORTED', true));
+    }
+
+    if (!signal) {
+      return;
+    }
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }

@@ -6,7 +6,8 @@
  * - 可重试错误按配置重试并最终成功；
  * - 重试耗尽后抛出最后一次错误；
  * - 不可重试错误不重试；
- * - 慢 Provider 触发超时并按可重试错误重试。
+ * - 慢 Provider 触发超时并按可重试错误重试；
+ * - 超时通过 AbortSignal 真正取消底层 Provider 调用。
  */
 import { describe, expect, it } from 'vitest';
 
@@ -14,6 +15,7 @@ import { AiService } from '../../src/services/ai/ai.service.js';
 import { AiError } from '../../src/services/ai/errors.js';
 import type {
   AiGenerateContext,
+  AiGenerateOptions,
   AiGenerateResult,
   AiProvider,
 } from '../../src/services/ai/types.js';
@@ -55,6 +57,34 @@ class FakeProvider implements AiProvider {
  */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 监听 AbortSignal 的 Provider（验证超时会真正取消底层调用）
+ */
+class AbortAwareProvider implements AiProvider {
+  readonly name = 'abort-aware';
+  aborted = false;
+
+  async generate(
+    _context: AiGenerateContext,
+    options?: AiGenerateOptions,
+  ): Promise<AiGenerateResult> {
+    return new Promise<AiGenerateResult>((_resolve, reject) => {
+      if (!options?.signal) {
+        return; // 未提供 signal：永不结束（由超时竞速兜底，正常路径总会提供）
+      }
+      const onAbort = () => {
+        this.aborted = true;
+        reject(new AiError('aborted', 'AI_ABORTED', true));
+      };
+      if (options.signal.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
 }
 
 describe('AiService.generateWithRetry', () => {
@@ -107,5 +137,16 @@ describe('AiService.generateWithRetry', () => {
       ),
     ).resolves.toBe('reply-2');
     expect(provider.calls).toBe(2);
+  });
+
+  it('aborts the underlying provider call on timeout', async () => {
+    const provider = new AbortAwareProvider();
+    const service = new AiService(provider);
+
+    await expect(
+      service.generateWithRetry({ content: 'hi' }, { maxRetries: 0, timeoutMs: 20 }),
+    ).rejects.toMatchObject({ code: 'AI_TIMEOUT' });
+    // 超时后 signal 已 abort，Provider 应感知到取消
+    expect(provider.aborted).toBe(true);
   });
 });

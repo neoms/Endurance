@@ -208,9 +208,15 @@ export async function sendMessage(
  *
  * @param userId         当前用户 id
  * @param conversationId 目标对话 id
- * @param query          { cursor?, limit }
+ * @param query          { cursor?, before?, limit }
  * @returns Promise<MessageOutput[]> 按时间升序的消息列表
  * @throws AppError(404) 对话不存在或不属于当前用户
+ * @throws AppError(400 INVALID_CURSOR) cursor/before 不是该对话内的消息
+ *
+ * 分页语义：
+ * - 默认（cursor 与 before 都省略）：返回最近 limit 条（升序），聊天页首屏展示最新消息；
+ * - before=<id>：返回该消息之前（不含）的 limit 条（升序），用于「加载更早」；
+ * - cursor=<id>：返回该消息之后（不含）的 limit 条（升序），用于正向向下翻页。
  */
 export async function listMessages(
   userId: string,
@@ -218,13 +224,55 @@ export async function listMessages(
   query: ListMessagesQuery,
 ): Promise<MessageOutput[]> {
   await assertConversationOwnership(userId, conversationId);
-  const messages = await prisma.message.findMany({
-    where: { conversationId },
-    // 以 (createdAt, id) 双字段排序，保证游标分页顺序稳定
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    take: query.limit,
-    ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-  });
+
+  // 游标/锚点校验：cursor 与 before 都必须是「当前对话内」的消息。
+  // 若传了不存在的 id 或他人对话的消息 id，统一返回 400（而不是 Prisma 报错/静默空列表）。
+  const anchorId = query.before ?? query.cursor;
+  let anchor: { id: string; createdAt: Date } | null = null;
+  if (anchorId) {
+    anchor = await prisma.message.findFirst({
+      where: { id: anchorId, conversationId },
+      select: { id: true, createdAt: true },
+    });
+    if (!anchor) {
+      throw new AppError(400, 'INVALID_CURSOR', 'Cursor message not found in this conversation');
+    }
+  }
+
+  let messages: Message[];
+  if (query.before && anchor) {
+    // 反向分页：取锚点之前（按 (createdAt, id) 复合键严格小于）的 limit 条，
+    // 先倒序取再反转回升序，保证「最近优先取满一页」且返回顺序仍为时间升序。
+    messages = await prisma.message.findMany({
+      where: {
+        conversationId,
+        OR: [
+          { createdAt: { lt: anchor.createdAt } },
+          { createdAt: anchor.createdAt, id: { lt: anchor.id } },
+        ],
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: query.limit,
+    });
+    messages.reverse();
+  } else if (query.cursor) {
+    // 正向分页：以 (createdAt, id) 升序，从游标之后继续取
+    messages = await prisma.message.findMany({
+      where: { conversationId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: query.limit,
+      cursor: { id: query.cursor },
+      skip: 1,
+    });
+  } else {
+    // 默认：返回最近 limit 条（升序），聊天页首屏应展示最新消息
+    messages = await prisma.message.findMany({
+      where: { conversationId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: query.limit,
+    });
+    messages.reverse();
+  }
   return messages.map(toMessageOutput);
 }
 
@@ -269,10 +317,26 @@ export async function retryAiMessage(
     orderBy: { createdAt: 'desc' },
   });
 
+  // 取失败消息之前的历史（排除 FAILED，最多 HISTORY_SIZE 条）作为重试的多轮上下文，
+  // 与正常发送消息的 buildHistory 行为保持一致，避免重试退化为单轮回答。
+  const history = await prisma.message.findMany({
+    where: {
+      conversationId: message.conversationId,
+      createdAt: { lt: message.createdAt },
+      status: { not: MessageStatus.FAILED },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: HISTORY_SIZE,
+  });
+  const contextHistory = history.reverse().map((m) => ({
+    role: m.senderType === SenderType.HUMAN ? ('user' as const) : ('assistant' as const),
+    content: m.content,
+  }));
+
   try {
     const reply = await aiService.generateWithRetry({
       content: promptMessage?.content ?? '请重新生成回复',
-      history: [],
+      history: contextHistory,
     });
     const updated = await prisma.message.update({
       where: { id: messageId },

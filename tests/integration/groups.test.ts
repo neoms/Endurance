@@ -338,4 +338,17 @@ describe('groups API', () => {
     expect(sendRes.status).toBe(404);
     expect(listRes.status).toBe(404);
   });
+
+  it('rejects an invalid message cursor with 400', async () => {
+    const { token } = await registerUser(app, 'groupowner');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: 'g', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(app)
+      .get(`/api/groups/${groupId}/messages?cursor=not-a-real-id`)
+      .set(auth(token));
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('INVALID_CURSOR');
+  });
 });

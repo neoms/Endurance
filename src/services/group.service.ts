@@ -604,21 +604,68 @@ export async function sendGroupMessage(
  *
  * @param userId  当前用户 id
  * @param groupId 目标群组 id
- * @param query   { cursor?, limit }
+ * @param query   { cursor?, before?, limit }
  * @returns Promise<GroupMessageOutput[]> 含人类与机器人发言
  * @throws AppError(404) 群组不存在或当前用户不是成员
+ * @throws AppError(400 INVALID_CURSOR) cursor/before 不是该群组内的消息
+ *
+ * 分页语义与个人对话历史一致：
+ * - 默认：返回最近 limit 条（升序）；
+ * - before=<id>：返回该消息之前（不含）的 limit 条（升序，聊天页「加载更早」）；
+ * - cursor=<id>：返回该消息之后（不含）的 limit 条（升序，正向翻页）。
  */
 export async function listGroupMessages(
   userId: string,
   groupId: string,
-  query: { cursor?: string; limit: number },
+  query: { cursor?: string; before?: string; limit: number },
 ): Promise<GroupMessageOutput[]> {
   await assertGroupAccess(userId, groupId);
-  const messages = await prisma.groupMessage.findMany({
-    where: { groupId },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    take: query.limit,
-    ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-  });
+
+  // 锚点校验：cursor/before 必须是该群组内的消息，否则 400（避免静默空列表或错误定位）
+  const anchorId = query.before ?? query.cursor;
+  let anchor: { id: string; createdAt: Date } | null = null;
+  if (anchorId) {
+    anchor = await prisma.groupMessage.findFirst({
+      where: { id: anchorId, groupId },
+      select: { id: true, createdAt: true },
+    });
+    if (!anchor) {
+      throw new AppError(400, 'INVALID_CURSOR', 'Cursor message not found in this group');
+    }
+  }
+
+  let messages: GroupMessage[];
+  if (query.before && anchor) {
+    // 反向分页：锚点之前（(createdAt, id) 复合键严格小于）取 limit 条，反转回升序
+    messages = await prisma.groupMessage.findMany({
+      where: {
+        groupId,
+        OR: [
+          { createdAt: { lt: anchor.createdAt } },
+          { createdAt: anchor.createdAt, id: { lt: anchor.id } },
+        ],
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: query.limit,
+    });
+    messages.reverse();
+  } else if (query.cursor) {
+    // 正向分页
+    messages = await prisma.groupMessage.findMany({
+      where: { groupId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: query.limit,
+      cursor: { id: query.cursor },
+      skip: 1,
+    });
+  } else {
+    // 默认：最近 limit 条（升序）
+    messages = await prisma.groupMessage.findMany({
+      where: { groupId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: query.limit,
+    });
+    messages.reverse();
+  }
   return messages.map(toGroupMessageOutput);
 }

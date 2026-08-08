@@ -21,6 +21,8 @@ export default function GroupDetailPage() {
   const [group, setGroup] = useState<Group | null>(null);
   const [bots, setBots] = useState<Bot[]>([]);
   const [messages, setMessages] = useState<GroupMessage[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
@@ -31,7 +33,7 @@ export default function GroupDetailPage() {
   const isOwner = user !== null && group?.creatorId === user.id;
 
   /**
-   * 加载群组详情、可用机器人与历史消息
+   * 加载群组详情、可用机器人与最近历史消息（默认返回最近 50 条，升序）
    */
   const load = useCallback(async () => {
     if (!id) return;
@@ -44,6 +46,7 @@ export default function GroupDetailPage() {
       setGroup(groupRes.group);
       setBots(botsRes.bots);
       setMessages(messagesRes.messages);
+      setHasMore(messagesRes.messages.length === 50);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '加载失败');
     }
@@ -53,8 +56,35 @@ export default function GroupDetailPage() {
     void load();
   }, [load]);
 
+  /**
+   * 加载更早的群组历史消息（before = 当前最早一条消息的 id，结果前插）
+   */
+  const loadOlder = async () => {
+    if (!id || messages.length === 0 || loadingMore) return;
+    setLoadingMore(true);
+    setError('');
+    try {
+      const first = messages[0]!;
+      const res = await api<{ messages: GroupMessage[] }>(
+        `/groups/${id}/messages?before=${encodeURIComponent(first.id)}&limit=50`,
+      );
+      setMessages((prev) => [...res.messages, ...prev]);
+      setHasMore(res.messages.length === 50);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '加载更早消息失败');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  // 仅当消息追加在末尾（发送新消息）时滚动到底部；加载更早消息（前插）时不滚动
+  const prevFirstId = useRef<string | null>(null);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const firstId = messages[0]?.id ?? null;
+    if (prevFirstId.current !== null && firstId === prevFirstId.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+    prevFirstId.current = firstId;
   }, [messages]);
 
   /** 机器人 id → 名称映射（渲染消息时显示发言者） */
@@ -223,6 +253,17 @@ export default function GroupDetailPage() {
 
         <div className="card chat-window">
           <div className="chat-messages">
+            {hasMore && (
+              <div className="center" style={{ padding: 8 }}>
+                <button
+                  className="secondary"
+                  onClick={() => void loadOlder()}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? '加载中…' : '加载更早消息'}
+                </button>
+              </div>
+            )}
             {messages.map((message) => (
               <div key={message.id}>
                 <div className={`bubble ${message.senderType === 'HUMAN' ? 'user' : 'bot'}`}>

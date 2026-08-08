@@ -653,14 +653,16 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
   /**
    * GET /api/groups/{id}/messages 群组历史消息（游标分页）
    *
-   * 查询参数：cursor、limit（1-100，默认 50）；返回值：200 { messages }。
+   * 查询参数：cursor（正向翻页）、before（反向加载更早）、limit（1-100，默认 50）；
+   * 返回值：200 { messages }（按时间升序）。cursor/before 都省略时返回最近 limit 条。
    *
    * @openapi
    * /api/groups/{id}/messages:
    *   get:
    *     tags: [Groups]
    *     summary: 群组历史消息（游标分页）
-   *     description: 按时间升序返回群组内全部消息（人类与机器人发言）；支持游标分页。
+   *     description: 按时间升序返回群组内消息（人类与机器人发言）。
+   *       默认返回最近 limit 条；`before` 返回该消息之前的消息；`cursor` 正向翻页。
    *     security:
    *       - bearerAuth: []
    *     parameters:
@@ -673,7 +675,13 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *       - name: cursor
    *         in: query
    *         required: false
-   *         description: 游标（上一页最后一条消息的 id），省略表示第一页
+   *         description: 正向游标：返回该消息之后（不含）的 limit 条
+   *         schema:
+   *           type: string
+   *       - name: before
+   *         in: query
+   *         required: false
+   *         description: 反向锚点：返回该消息之前（不含）的 limit 条
    *         schema:
    *           type: string
    *       - name: limit
@@ -700,6 +708,12 @@ export function createGroupsRouter(deps: { aiService: AiService }) {
    *               $ref: '#/components/schemas/ErrorResponse'
    *       '404':
    *         description: 群组不存在或当前用户不是成员
+   *         content:
+   *           application/json:
+   *             schema:
+   *               $ref: '#/components/schemas/ErrorResponse'
+   *       '400':
+   *         description: cursor/before 不是该群组内的消息
    *         content:
    *           application/json:
    *             schema:
