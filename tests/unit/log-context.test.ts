@@ -37,6 +37,12 @@ describe('log context (AsyncLocalStorage)', () => {
     expect(logMixin()).toEqual({});
   });
 
+  it('tolerates setContextUserId outside any request scope', () => {
+    // 非请求线程调用：应静默跳过（ctx 为 undefined），不抛错也不污染其他上下文
+    expect(() => setContextUserId('orphan-user')).not.toThrow();
+    expect(getLogContext()).toBeUndefined();
+  });
+
   it('restores the outer context after an inner scope ends', () => {
     runWithLogContext({ requestId: 'outer' }, () => {
       runWithLogContext({ requestId: 'inner' }, () => {

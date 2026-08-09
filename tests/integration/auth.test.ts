@@ -131,6 +131,18 @@ describe('auth API', () => {
     expect(res.status).toBe(401);
   });
 
+  it('rejects a token whose user was deleted (401)', async () => {
+    // 注册后直接从数据库删除用户，模拟账号注销后 token 仍被使用
+    const { token } = await registerUser(app, 'ghostuser');
+    await prisma.user.delete({ where: { username: 'ghostuser' } });
+
+    const res = await request(app).get('/api/auth/me').set(auth(token));
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('UNAUTHORIZED');
+    expect(res.body.error.message).toBe('User no longer exists');
+  });
+
   it('converts unique-constraint race to 409 (no 500)', async () => {
     // 直接插入同名用户，模拟「另一个并发请求已经创建成功」的中间状态
     await prisma.user.create({

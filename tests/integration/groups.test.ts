@@ -677,6 +677,46 @@ describe('groups API', () => {
     expect(res.body.error.code).toBe('INVALID_CURSOR');
   });
 
+  it('paginates group history with before and cursor', async () => {
+    const { token } = await registerUser(app, 'gpager');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: '分页群', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    // 发送 3 轮消息（每轮 1 条人类消息 + 至少 1 条机器人回复）
+    for (const content of ['第一轮', '第二轮', '第三轮']) {
+      await request(app).post(`/api/groups/${groupId}/messages`).set(auth(token)).send({ content });
+    }
+
+    const all = await request(app)
+      .get(`/api/groups/${groupId}/messages?limit=100`)
+      .set(auth(token));
+    const messages = all.body.messages as Array<{ id: string }>;
+    expect(messages.length).toBeGreaterThanOrEqual(6);
+
+    // 取中间一条作为锚点，保证两侧都还有消息
+    const idx = Math.floor(messages.length / 2);
+    const anchorId = messages[idx]!.id;
+
+    // before：返回锚点之前（不含锚点）最近 limit 条，按时间升序
+    const beforeRes = await request(app)
+      .get(`/api/groups/${groupId}/messages?before=${anchorId}&limit=2`)
+      .set(auth(token));
+    expect(beforeRes.status).toBe(200);
+    expect((beforeRes.body.messages as Array<{ id: string }>).map((m) => m.id)).toEqual(
+      messages.slice(idx - 2, idx).map((m) => m.id),
+    );
+
+    // cursor：正向翻页，返回锚点之后（不含锚点）的 limit 条
+    const cursorRes = await request(app)
+      .get(`/api/groups/${groupId}/messages?cursor=${anchorId}&limit=2`)
+      .set(auth(token));
+    expect(cursorRes.status).toBe(200);
+    expect((cursorRes.body.messages as Array<{ id: string }>).map((m) => m.id)).toEqual(
+      messages.slice(idx + 1, idx + 3).map((m) => m.id),
+    );
+  });
+
   it('streams bot replies via SSE (?stream=true)', async () => {
     const { token } = await registerUser(app, 'gstream');
     const [botId] = await getBotIds();
@@ -822,5 +862,132 @@ describe('groups API', () => {
       .map((e) => (e.data as { message: { content: string } }).message.content);
     expect(doneContents).toEqual(first.body.botMessages.map((m: { content: string }) => m.content));
     expect(provider.calls).toBe(2);
+  });
+
+  it('emits an SSE error when streaming with an unresolved mention', async () => {
+    const { token } = await registerUser(app, 'gmention');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: '提及群', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(app)
+      .post(`/api/groups/${groupId}/messages?stream=true`)
+      .set(auth(token))
+      .send({ content: '@不存在的人 你好' });
+
+    expect(res.status).toBe(200);
+    const events = parseSse(res.text);
+    const errEvent = events.find((e) => e.event === 'error');
+    expect(errEvent?.data).toMatchObject({ error: { code: 'MENTION_NOT_FOUND' } });
+  });
+
+  it('replays the first streamed round when the same clientRequestId is submitted again', async () => {
+    const { token } = await registerUser(app, 'gidem');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, {
+      name: '幂等群',
+      botIds: [botId!],
+      responseMode: 'ALL_BOTS',
+    });
+    const groupId = created.body.group.id as string;
+    const payload = { content: '群幂等', clientRequestId: 'group-stream-000001' };
+
+    const first = await request(app)
+      .post(`/api/groups/${groupId}/messages?stream=true`)
+      .set(auth(token))
+      .send(payload);
+    const second = await request(app)
+      .post(`/api/groups/${groupId}/messages?stream=true`)
+      .set(auth(token))
+      .send(payload);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+
+    // 幂等命中：回放 user_message + 各机器人 bot_done + round_done，不再产出增量
+    const names = parseSse(second.text).map((e) => e.event);
+    expect(names[0]).toBe('user_message');
+    expect(names).not.toContain('bot_delta');
+    expect(names.filter((n) => n === 'bot_done')).toHaveLength(1);
+    expect(names[names.length - 1]).toBe('round_done');
+  });
+
+  it('rejects an empty group update body with 422', async () => {
+    const { token } = await registerUser(app, 'gupdate');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: '更新群', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    // 更新请求体至少需要一个字段：空对象应触发 422 校验错误
+    const res = await request(app).patch(`/api/groups/${groupId}`).set(auth(token)).send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns group detail to the owner', async () => {
+    const { token } = await registerUser(app, 'gdetail');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: '详情群', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(app).get(`/api/groups/${groupId}`).set(auth(token));
+
+    expect(res.status).toBe(200);
+    expect(res.body.group).toMatchObject({ id: groupId, name: '详情群' });
+  });
+
+  it('updates group name via PATCH', async () => {
+    const { token } = await registerUser(app, 'gpatchok');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: '旧名字', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    const res = await request(app)
+      .patch(`/api/groups/${groupId}`)
+      .set(auth(token))
+      .send({ name: '新名字' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.group.name).toBe('新名字');
+  });
+
+  it('emits an SSE error when streaming to a missing group', async () => {
+    const { token } = await registerUser(app, 'gstream404');
+
+    const res = await request(app)
+      .post('/api/groups/not-a-real-group/messages?stream=true')
+      .set(auth(token))
+      .send({ content: 'hi' });
+
+    expect(res.status).toBe(200);
+    const events = parseSse(res.text);
+    const errEvent = events.find((e) => e.event === 'error');
+    expect(errEvent?.data).toMatchObject({ error: { code: 'GROUP_NOT_FOUND' } });
+  });
+
+  it('emits an SSE error when the group has no active bots', async () => {
+    const { token } = await registerUser(app, 'gnobot');
+    const [botId] = await getBotIds();
+    const created = await createGroup(token, { name: '无机器人群', botIds: [botId!] });
+    const groupId = created.body.group.id as string;
+
+    try {
+      // 把群内机器人停用：模拟全部机器人被移除/停用的防御场景
+      await prisma.bot.update({ where: { id: botId! }, data: { isActive: false } });
+
+      const res = await request(app)
+        .post(`/api/groups/${groupId}/messages?stream=true`)
+        .set(auth(token))
+        .send({ content: 'hi' });
+
+      expect(res.status).toBe(200);
+      const events = parseSse(res.text);
+      const errEvent = events.find((e) => e.event === 'error');
+      expect(errEvent?.data).toMatchObject({ error: { code: 'NO_ACTIVE_BOT' } });
+    } finally {
+      // 恢复机器人启用状态，避免影响后续用例
+      await prisma.bot.update({ where: { id: botId! }, data: { isActive: true } });
+    }
   });
 });

@@ -324,4 +324,78 @@ describe('AiService.streamWithRetry', () => {
 
     expect(chunks).toHaveLength(2);
   });
+
+  it('aborts the attempt immediately when the client signal is already aborted', async () => {
+    // 客户端在发起请求前就已断连：不应启动任何重试，直接以 AI_ABORTED 结束
+    const service = new AiService(new HangingStreamProvider());
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(async () => {
+      for await (const _chunk of service.streamWithRetry(
+        { content: 'hi' },
+        { clientSignal: controller.signal },
+      )) {
+        // 不应产出任何内容
+      }
+    }).rejects.toMatchObject({ code: 'AI_ABORTED', retryable: true });
+  });
+
+  it('falls back to one-shot generate when the provider has no stream method', async () => {
+    // 未来 Provider 若只实现 generate（无流式），streamWithRetry 应退化为一次性生成
+    class GenerateOnlyProvider implements AiProvider {
+      readonly name = 'generate-only';
+
+      async generate(context: AiGenerateContext): Promise<AiGenerateResult> {
+        return { content: `一次性回复:${context.content}` };
+      }
+    }
+
+    const service = new AiService(new GenerateOnlyProvider());
+    const chunks: string[] = [];
+    for await (const chunk of service.streamWithRetry({ content: 'hi' })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(['一次性回复:hi']);
+  });
+
+  it('does not retry non-retryable errors in stream mode', async () => {
+    // 4xx 类不可重试错误：调用一次即终止，不浪费重试次数
+    class NonRetryableStreamProvider implements AiProvider {
+      readonly name = 'non-retryable-stream';
+      calls = 0;
+
+      stream(): AsyncIterable<string> {
+        this.calls += 1;
+        // 手动实现异步迭代器协议：首次 next() 即抛不可重试错误
+        let done = false;
+        const iterator: AsyncIterator<string> = {
+          async next(): Promise<IteratorResult<string>> {
+            if (!done) {
+              done = true;
+              throw new AiError('bad request', 'AI_INVALID_REQUEST', false);
+            }
+            return { done: true, value: undefined };
+          },
+        };
+        return { [Symbol.asyncIterator]: () => iterator };
+      }
+
+      async generate(): Promise<AiGenerateResult> {
+        throw new Error('generate is not used in stream tests');
+      }
+    }
+
+    const provider = new NonRetryableStreamProvider();
+    const service = new AiService(provider);
+
+    await expect(async () => {
+      for await (const _chunk of service.streamWithRetry({ content: 'hi' })) {
+        // 不应有任何产出
+      }
+    }).rejects.toMatchObject({ code: 'AI_INVALID_REQUEST', retryable: false });
+
+    expect(provider.calls).toBe(1);
+  });
 });

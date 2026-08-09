@@ -256,6 +256,118 @@ describe('DeepSeekProvider stream', () => {
       }
     }).rejects.toMatchObject({ code: 'AI_INVALID_REQUEST', retryable: false });
   });
+
+  it('skips malformed SSE data frames and continues streaming', async () => {
+    // 个别 data 帧不是合法 JSON：记录日志跳过，不让整个流崩掉
+    const sseBody = [
+      'data: {broken-json',
+      '',
+      'data: {"choices":[{"delta":{"content":"好"}}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+    const provider = makeProvider(
+      async () =>
+        new Response(sseBody, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+
+    const chunks: string[] = [];
+    for await (const chunk of provider.stream({ content: 'hi' }, {})) {
+      chunks.push(chunk);
+    }
+
+    // 坏帧被跳过，后续正常帧照常产出
+    expect(chunks.join('')).toBe('好');
+  });
+
+  it('throws AI_ABORTED when the stream is interrupted after cancellation', async () => {
+    // 上游连接在取消信号生效后被掐断：应归一化为可重试的 AI_ABORTED
+    const provider = makeProvider(
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode('data: {"choices":[{"delta":{"content":"A"}}]}\n\n'),
+              );
+            },
+            pull(controller) {
+              controller.error(new Error('connection reset'));
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        ),
+    );
+
+    const controller = new AbortController();
+    const iterator = provider
+      .stream({ content: 'hi' }, { signal: controller.signal })
+      [Symbol.asyncIterator]();
+
+    // 先产出首块，再取消并等待下一块读取失败
+    const first = await iterator.next();
+    expect(first.value).toBe('A');
+    controller.abort();
+
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: 'AI_ABORTED',
+      retryable: true,
+    });
+  });
+
+  it('treats an interrupted stream as a retryable AI_UNAVAILABLE', async () => {
+    // 连接中途被上游掐断（未取消）：归类为可重试的 AI_UNAVAILABLE
+    const provider = makeProvider(
+      async () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              controller.error(new Error('socket hang up'));
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        ),
+    );
+
+    await expect(async () => {
+      for await (const _chunk of provider.stream({ content: 'hi' }, {})) {
+        // 不应有任何产出
+      }
+    }).rejects.toMatchObject({ code: 'AI_UNAVAILABLE', retryable: true });
+  });
+
+  it('treats a response without a body as a retryable failure', async () => {
+    // 服务端返回 200 但没有任何响应体：拿不到 reader，应视为可重试异常
+    const provider = makeProvider(async () => new Response(null, { status: 200 }));
+
+    await expect(async () => {
+      for await (const _chunk of provider.stream({ content: 'hi' }, {})) {
+        // 不应有任何产出
+      }
+    }).rejects.toMatchObject({ code: 'AI_UNAVAILABLE', retryable: true });
+  });
+
+  it('ends the stream when the upstream closes without a [DONE] marker', async () => {
+    // 服务端正常关闭但未发 [DONE]：读取循环应在 done=true 时自然结束
+    const provider = makeProvider(
+      async () =>
+        new Response('data: {"choices":[{"delta":{"content":"收"}}]}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+
+    const chunks: string[] = [];
+    for await (const chunk of provider.stream({ content: 'hi' }, {})) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.join('')).toBe('收');
+  });
 });
 
 describe('createDefaultAiProvider factory', () => {

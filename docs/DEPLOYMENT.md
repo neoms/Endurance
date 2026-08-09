@@ -263,4 +263,3 @@ docker compose down -v         # 停止并删除数据卷（慎用）
 | 请求频繁返回 429             | 触发限流：确认 `RATE_LIMIT_MAX` 配置合理，查看 `Retry-After` 头           |
 | 日志面板空白                 | 确认 `LOG_LEVEL` 不为 silent；生产日志走 stdout，检查平台 stdout 采集设置 |
 | 端口被占用                   | 修改 `PORT` 环境变量；本地确认无残留进程                                  |
-

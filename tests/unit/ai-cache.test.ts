@@ -54,4 +54,16 @@ describe('AiReplyCache', () => {
     // 顺序不同 → 不同键（避免「内容+机器人列表」错位误命中）
     expect(cacheKey(['a', 'b'])).not.toBe(cacheKey(['b', 'a']));
   });
+
+  it('clears all entries with clear()', () => {
+    const cache = new AiReplyCache(60_000);
+    cache.set('a', 'x');
+    cache.set('b', 'y');
+
+    cache.clear();
+
+    expect(cache.size).toBe(0);
+    expect(cache.get<string>('a')).toBeNull();
+    expect(cache.get<string>('b')).toBeNull();
+  });
 });

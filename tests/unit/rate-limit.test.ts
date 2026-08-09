@@ -8,11 +8,17 @@
  * - reset() 清空状态后立即恢复放行。
  */
 import express from 'express';
+import type { Request } from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 
 import { errorHandler } from '../../src/lib/errors.js';
-import { createRateLimiter, type RateLimiterMiddleware } from '../../src/lib/rate-limit.js';
+import {
+  createRateLimiter,
+  ipKey,
+  userKey,
+  type RateLimiterMiddleware,
+} from '../../src/lib/rate-limit.js';
 
 /**
  * 构造带限流中间件的最小测试应用
@@ -96,5 +102,32 @@ describe('createRateLimiter', () => {
 
     limiter.reset();
     expect((await request(app).get('/ping')).status).toBe(200);
+  });
+
+  it('prunes only expired timestamps and keeps recent ones for a key', async () => {
+    // 窗口 100ms、上限放宽到 100：同一 key 在窗口内两次请求；
+    // 定时清理触发时至少有一条仍存活 → 命中「部分过期则回写」分支
+    const app = makeApp(
+      createRateLimiter({ windowMs: 100, max: 100, keyPrefix: 't', keyFrom: () => 'same' }),
+    );
+
+    expect((await request(app).get('/ping')).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect((await request(app).get('/ping')).status).toBe(200);
+    // 等待清理定时器（windowMs=100ms）触发：第一条可能过期、第二条仍存活
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect((await request(app).get('/ping')).status).toBe(200);
+  });
+
+  it('falls back through ip → socket address → unknown for ipKey', () => {
+    expect(ipKey({ ip: '1.2.3.4' } as unknown as Request)).toBe('1.2.3.4');
+    expect(ipKey({ socket: { remoteAddress: '9.9.9.9' } } as unknown as Request)).toBe('9.9.9.9');
+    // Express 请求的 socket 总是存在；remoteAddress 缺失时才回退 unknown
+    expect(ipKey({ socket: {} } as unknown as Request)).toBe('unknown');
+  });
+
+  it('uses the user id when present and falls back to IP otherwise for userKey', () => {
+    expect(userKey({ user: { id: 'user-1' } } as unknown as Request)).toBe('user-1');
+    expect(userKey({ ip: '1.2.3.4' } as unknown as Request)).toBe('1.2.3.4');
   });
 });

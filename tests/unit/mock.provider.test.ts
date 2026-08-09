@@ -61,4 +61,55 @@ describe('MockAiProvider stream', () => {
 
     await expect(iterator.next()).rejects.toBeInstanceOf(AiError);
   });
+
+  it('rejects immediately when the signal is already aborted', async () => {
+    // 进入流之前 signal 已 abort：不应挂起等待，应立刻抛出可重试错误
+    const provider = new MockAiProvider({ streamChunkDelayMs: 1000 });
+    const controller = new AbortController();
+    controller.abort();
+
+    const iterator = provider
+      .stream({ content: '提前取消' }, { signal: controller.signal })
+      [Symbol.asyncIterator]();
+
+    await expect(iterator.next()).rejects.toThrow(/aborted/i);
+  });
+
+  it('does not hang when delaying chunks without a cancel signal', async () => {
+    // 有块间延迟但未传 signal：sleep 应跳过信号监听，正常产出全部块
+    const provider = new MockAiProvider({ streamChunkDelayMs: 5 });
+    const chunks: string[] = [];
+    for await (const chunk of provider.stream({ content: '无信号延迟' }, {})) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.join('')).toContain('无信号延迟');
+  });
+
+  it('rejects when the signal is aborted during the simulated delay', async () => {
+    // 模拟延迟期间被取消：sleep 的信号监听应主动中断等待并抛出 AI_ABORTED
+    const provider = new MockAiProvider({ delayMs: 50 });
+    const controller = new AbortController();
+    const promise = provider.generate({ content: '慢请求' }, { signal: controller.signal });
+
+    setTimeout(() => controller.abort(), 5);
+
+    await expect(promise).rejects.toMatchObject({ code: 'AI_ABORTED', retryable: true });
+  });
+
+  it('returns one of the fixed random replies in random mode', async () => {
+    // random 模式：回复必须来自预设话术库，而不是回显用户输入
+    const RANDOM_REPLIES = [
+      '这个想法很有意思，能展开讲讲吗？',
+      '收到！让我想想怎么帮你。',
+      '嗯嗯，我在听，继续说～',
+      '好的，已记录。这是一条模拟回复。',
+    ];
+    const provider = new MockAiProvider({ mode: 'random' });
+
+    for (let i = 0; i < 20; i += 1) {
+      const result = await provider.generate({ content: '任意输入' });
+      expect(RANDOM_REPLIES).toContain(result.content);
+    }
+  });
 });

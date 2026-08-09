@@ -456,6 +456,36 @@ describe('messages API', () => {
     expect(listRes.status).toBe(404);
   });
 
+  it('paginates forward with the cursor parameter', async () => {
+    const { token } = await registerUser(app, 'cursoruser');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    // 发送 3 轮 → 共 6 条消息（HUMAN+BOT 交替落库）
+    for (const content of ['第一轮', '第二轮', '第三轮']) {
+      await request(app)
+        .post(`/api/conversations/${id}/messages`)
+        .set(auth(token))
+        .send({ content });
+    }
+
+    const all = await request(app)
+      .get(`/api/conversations/${id}/messages?limit=100`)
+      .set(auth(token));
+    const ids = (all.body.messages as Array<{ id: string }>).map((m) => m.id);
+    expect(ids).toHaveLength(6);
+
+    // 正向翻页：以第 2 条消息为游标，取 2 条 → 应得到第 3、4 条（不含游标本身）
+    const page = await request(app)
+      .get(`/api/conversations/${id}/messages?cursor=${ids[1]}&limit=2`)
+      .set(auth(token));
+    expect(page.status).toBe(200);
+    expect((page.body.messages as Array<{ id: string }>).map((m) => m.id)).toEqual([
+      ids[2],
+      ids[3],
+    ]);
+  });
+
   it('marks AI message FAILED on persistent provider failure and retry recovers it', async () => {
     const { token } = await registerUser(app, 'retryuser');
     const conv = await createConversation(app, token);
@@ -479,6 +509,29 @@ describe('messages API', () => {
     expect(retry.status).toBe(200);
     expect(retry.body.aiMessage.status).toBe('SENT');
     expect(retry.body.aiMessage.errorCode).toBeNull();
+  });
+
+  it('keeps the FAILED marker with error info when retry also fails', async () => {
+    const { token } = await registerUser(app, 'retryfail');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+
+    // 故障应用发送：AI 消息 FAILED 占位（用户消息仍保存）
+    const sent = await request(failingApp)
+      .post(`/api/conversations/${id}/messages`)
+      .set(auth(token))
+      .send({ content: '一直失败' });
+    expect(sent.status).toBe(201);
+    expect(sent.body.aiMessage.status).toBe('FAILED');
+
+    // 仍在故障应用上重试：重试失败后消息保持 FAILED 并更新错误信息，而非返回 500
+    const retry = await request(failingApp)
+      .post(`/api/messages/${sent.body.aiMessage.id}/retry`)
+      .set(auth(token));
+    expect(retry.status).toBe(200);
+    expect(retry.body.aiMessage.status).toBe('FAILED');
+    expect(retry.body.aiMessage.errorCode).toBe('AI_UNAVAILABLE');
+    expect(retry.body.aiMessage.errorMessage).toBeTruthy();
   });
 
   it('rejects retrying a sent or human message with 409', async () => {
@@ -647,5 +700,50 @@ describe('messages API', () => {
       first.body.aiMessage.content,
     );
     expect(provider.calls).toBe(1);
+  });
+
+  it('emits an SSE error event when streaming to a missing conversation', async () => {
+    const { token } = await registerUser(app, 'stream404');
+
+    const res = await request(app)
+      .post('/api/conversations/not-a-real-conversation/messages?stream=true')
+      .set(auth(token))
+      .send({ content: 'hi' });
+
+    // SSE 模式下错误无法改 HTTP 状态码：以 error 事件承载业务错误
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    const events = parseSse(res.text);
+    const errEvent = events.find((e) => e.event === 'error');
+    expect(errEvent?.data).toMatchObject({
+      error: { code: 'CONVERSATION_NOT_FOUND' },
+    });
+  });
+
+  it('replays the first streamed round when the same clientRequestId is submitted again', async () => {
+    const { token } = await registerUser(app, 'streamidem');
+    const conv = await createConversation(app, token);
+    const id = conv.body.conversation.id as string;
+    const payload = { content: '幂等流式', clientRequestId: 'stream-req-000001' };
+
+    const first = await request(app)
+      .post(`/api/conversations/${id}/messages?stream=true`)
+      .set(auth(token))
+      .send(payload);
+    const second = await request(app)
+      .post(`/api/conversations/${id}/messages?stream=true`)
+      .set(auth(token))
+      .send(payload);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+
+    // 幂等命中：直接回放 user_message + ai_done，不再产出增量
+    const names = parseSse(second.text).map((e) => e.event);
+    expect(names).toEqual(['user_message', 'ai_done']);
+
+    // 数据库只落一条用户消息 + 一条 AI 回复
+    const rows = await prisma.message.findMany({ where: { conversationId: id } });
+    expect(rows).toHaveLength(2);
   });
 });

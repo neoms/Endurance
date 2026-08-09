@@ -135,4 +135,28 @@ describe('summarizeMessages (确定性摘要)', () => {
   it('returns a marked empty summary for empty input', () => {
     expect(summarizeMessages([])).toBe('[历史消息摘要 · 共 0 条] ');
   });
+
+  it('skips messages containing only whitespace', () => {
+    const summary = summarizeMessages([
+      { role: 'user', content: '   \n\t ' },
+      { role: 'user', content: '有效内容' },
+    ]);
+
+    expect(summary).toContain('有效内容');
+    expect(summary).not.toContain('\n');
+  });
+
+  it('stops adding parts once the total budget is exceeded', () => {
+    // 20 条长消息：前几条就会超出总量预算，循环应提前 break
+    const messages = Array.from({ length: 20 }, (_, i) => ({
+      role: 'user' as const,
+      content: `消息${i}:${'长'.repeat(100)}`,
+    }));
+
+    const summary = summarizeMessages(messages);
+
+    // 头部仍统计全部 20 条，但正文只保留预算内的部分
+    expect(summary).toContain('共 20 条');
+    expect(summary.length).toBeLessThanOrEqual(850);
+  });
 });

@@ -207,4 +207,62 @@ describe('SemanticSummarizer', () => {
     // 无会话作用域 → 两次都是全量压缩（不做增量衔接）
     expect(prompts).toEqual([SUMMARY_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT]);
   });
+
+  it('deletes incremental state when the full compression input has no message ids', async () => {
+    // scopeId 存在但消息无 id：语义摘要成功后必须清理旧状态，避免下次误衔接
+    const { aiService, calls } = makeFakeAiService(async () => '语义摘要结果');
+    const summarizer = new SemanticSummarizer(aiService);
+
+    const summary = await summarizer.summarize(makeMessages(3), 'scope-no-ids');
+
+    expect(summary).toBe('语义摘要结果');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('evicts the oldest scope state when the state map exceeds its cap', async () => {
+    // 超过容量上限（500）后应淘汰最早一条会话状态，防止长期运行内存膨胀
+    const { aiService, calls } = makeFakeAiService(async () => '摘要');
+    const summarizer = new SemanticSummarizer(aiService);
+
+    // 连续为 501 个不同会话生成摘要：最后一次触发淘汰分支（不抛错即可）
+    for (let i = 0; i < 501; i += 1) {
+      await summarizer.summarize(makeMessagesWithIds(3, `scope-${i}`), `scope-${i}`);
+    }
+
+    expect(calls).toHaveLength(501);
+  });
+
+  it('returns a deterministic empty summary without calling AI for empty input', async () => {
+    const { aiService, calls } = makeFakeAiService(async () => '不应被调用');
+    const summarizer = new SemanticSummarizer(aiService);
+
+    const summary = await summarizer.summarize([]);
+
+    expect(summary).toContain('共 0 条');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('falls back to full compression when incremental compression fails', async () => {
+    // 增量调用失败：不直接降级确定性摘要，而是再尝试一次全量压缩（质量优先）
+    const prompts: string[] = [];
+    const { aiService } = makeFakeAiService((context) => {
+      prompts.push(context.systemPromptOverride ?? '');
+      if (context.systemPromptOverride === SUMMARY_INCREMENTAL_SYSTEM_PROMPT) {
+        throw new Error('incremental AI failure');
+      }
+      return '全量摘要';
+    });
+    const summarizer = new SemanticSummarizer(aiService);
+
+    await summarizer.summarize(makeMessagesWithIds(15), 'group-1');
+    const summary = await summarizer.summarize(makeMessagesWithIds(20), 'group-1');
+
+    expect(summary).toBe('全量摘要');
+    // 第一次全量 → 第二次先增量（失败）→ 再全量
+    expect(prompts).toEqual([
+      SUMMARY_SYSTEM_PROMPT,
+      SUMMARY_INCREMENTAL_SYSTEM_PROMPT,
+      SUMMARY_SYSTEM_PROMPT,
+    ]);
+  });
 });
