@@ -35,6 +35,7 @@ import { buildContextHistory, MAX_CONTEXT_HISTORY } from './ai/context.js';
 import type { AiService } from './ai/ai.service.js';
 import { cacheKey, type AiReplyCache } from './ai/cache.js';
 import { toAiErrorInfo } from './ai/errors.js';
+import { checkTopicGuard } from './ai/topic-guard.js';
 import type { SemanticSummarizer } from './ai/summarizer.js';
 import { assertConversationOwnership } from './conversation.service.js';
 
@@ -206,11 +207,32 @@ export async function sendMessage(
       data: { updatedAt: new Date() },
     });
 
+    // 第三步：话题范围守卫——与《星际穿越》无关的话题（或检测到越界引导）不再调用 AI，
+    // 直接以固定文案回复。这样既保证「只回答电影相关内容」（结果 100% 可预期），
+    // 又避免把越界问题喂给模型（防提示词注入的代码层防线，见 topic-guard.ts）。
+    // 用户消息已在上一步落库，固定回复同样落库，数据一致性不受影响。
+    const topicGuard = checkTopicGuard(content);
+    if (topicGuard.blocked) {
+      logger.info(
+        { userId, conversationId, reason: topicGuard.reason },
+        'message: topic guard blocked, using fixed off-topic reply',
+      );
+      const aiMessage = await prisma.message.create({
+        data: {
+          conversationId,
+          senderType: SenderType.BOT,
+          content: topicGuard.reply!,
+          status: MessageStatus.SENT,
+        },
+      });
+      return { userMessage: toMessageOutput(userMessage), aiMessage: toMessageOutput(aiMessage) };
+    }
+
     // 缓存键：对话 + 规范化内容（同一对话内相同问题可回放）
     const cacheKeyStr = cacheKey([conversationId, content]);
     const cachedReply = aiCache?.get<string>(cacheKeyStr);
 
-    // 第三步：缓存命中 → 直接回放上次回复（不调用 AI、不查历史，近乎瞬时返回）
+    // 第四步：缓存命中 → 直接回放上次回复（不调用 AI、不查历史，近乎瞬时返回）
     if (cachedReply) {
       logger.info({ conversationId, cacheKey: cacheKeyStr }, 'message: ai cache hit');
       const aiMessage = await prisma.message.create({
@@ -375,6 +397,27 @@ export async function streamSendMessage(
       where: { id: conversationId },
       data: { updatedAt: new Date() },
     });
+
+    // 话题范围守卫：与 sendMessage 完全一致——无关话题/越界引导不调用 AI，
+    // 直接落一条 SENT 固定回复并回放 userMessage + aiDone（无增量流，表现与缓存命中一致）。
+    const topicGuard = checkTopicGuard(content);
+    if (topicGuard.blocked) {
+      logger.info(
+        { userId, conversationId, reason: topicGuard.reason },
+        'message: stream topic guard blocked, using fixed off-topic reply',
+      );
+      const aiMessage = await prisma.message.create({
+        data: {
+          conversationId,
+          senderType: SenderType.BOT,
+          content: topicGuard.reply!,
+          status: MessageStatus.SENT,
+        },
+      });
+      events.userMessage?.(toMessageOutput(userMessage));
+      events.aiDone?.(toMessageOutput(aiMessage));
+      return;
+    }
 
     // 缓存键：对话 + 规范化内容
     const cacheKeyStr = cacheKey([conversationId, content]);
@@ -599,6 +642,29 @@ export async function retryAiMessage(
     summarizer,
     message.conversationId,
   );
+
+  // 话题范围守卫：若失败消息对应的用户消息与电影无关（或含越界引导），
+  // 重试时同样不调用 AI，直接更新为 SENT 固定文案——避免把越界问题重新喂给模型，
+  // 也与发送流程的拦截行为保持一致（代码层防注入防线见 topic-guard.ts）。
+  if (promptMessage) {
+    const topicGuard = checkTopicGuard(promptMessage.content);
+    if (topicGuard.blocked) {
+      logger.info(
+        { userId, messageId, reason: topicGuard.reason },
+        'message: retry topic guard blocked, using fixed off-topic reply',
+      );
+      const updated = await prisma.message.update({
+        where: { id: messageId },
+        data: {
+          content: topicGuard.reply!,
+          status: MessageStatus.SENT,
+          errorCode: null,
+          errorMessage: null,
+        },
+      });
+      return toMessageOutput(updated);
+    }
+  }
 
   try {
     const reply = await aiService.generateWithRetry({

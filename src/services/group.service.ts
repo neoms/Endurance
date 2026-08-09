@@ -58,6 +58,7 @@ import type {
 import { buildContextHistory, MAX_CONTEXT_HISTORY } from './ai/context.js';
 import type { AiService } from './ai/ai.service.js';
 import { cacheKey, type AiReplyCache } from './ai/cache.js';
+import { checkTopicGuard } from './ai/topic-guard.js';
 import type { SemanticSummarizer } from './ai/summarizer.js';
 
 // 机器人生成失败时的兜底文案（保证人类消息后必有回复）
@@ -924,6 +925,41 @@ export async function sendGroupMessage(
       ? mentionedActiveBots
       : selectBotsForRound(bots, group.responseMode, content, group.maxConsecutiveBotReplies);
 
+    // 话题范围守卫：与《星际穿越》无关的话题（或检测到越界引导）不再调用 AI，
+    // 本轮选中的每个 NPC 都只回复固定文案——严格满足「无关话题都只能回复这一句」，
+    // 同时零 token 成本、结果 100% 可预期。
+    // 注意：@提及选择与响应策略仍在守卫之前生效（如只 @ 真人时本轮本就没有 NPC 回复），
+    // 守卫只决定「被选中的 NPC 说什么」，不改变「谁回复」的规则。
+    const topicGuard = checkTopicGuard(content);
+    if (topicGuard.blocked) {
+      logger.info(
+        { groupId, roundId, userId, reason: topicGuard.reason, botReplies: selectedBots.length },
+        'group: topic guard blocked, using fixed off-topic replies',
+      );
+      const botMessages: GroupMessageOutput[] = [];
+      for (const bot of selectedBots) {
+        const saved = await prisma.groupMessage.create({
+          data: {
+            groupId,
+            roundId,
+            senderType: SenderType.BOT,
+            botId: bot.id,
+            content: topicGuard.reply!,
+            status: MessageStatus.SENT,
+          },
+        });
+        const savedWithSender = await prisma.groupMessage.findUnique({
+          where: { id: saved.id },
+          include: GROUP_MESSAGE_SENDER_INCLUDE,
+        });
+        botMessages.push(toGroupMessageOutput(savedWithSender!));
+      }
+      return {
+        userMessage: toGroupMessageOutput(userMessageWithSender!),
+        botMessages,
+      };
+    }
+
     // 缓存键：群组 + 规范化内容 + 本轮选中 NPC id（顺序敏感）。
     // 一次提问多人回答时，整轮回复作为一个整体缓存，命中后按原顺序回放全部 NPC。
     const roundKey = cacheKey([groupId, content, selectedBots.map((b) => b.id).join(',')]);
@@ -1180,6 +1216,43 @@ export async function streamSendGroupMessage(
     const selectedBots = hasMentions
       ? mentionedActiveBots
       : selectBotsForRound(bots, group.responseMode, content, group.maxConsecutiveBotReplies);
+
+    // 话题范围守卫：与 sendGroupMessage 完全一致——无关话题/越界引导不调用 AI，
+    // 被选中的每个 NPC 直接落 SENT 固定文案并回放 botDone（无增量流），
+    // 最后 roundDone 结束本轮，前端表现与正常完成一致。
+    const topicGuard = checkTopicGuard(content);
+    if (topicGuard.blocked) {
+      events.userMessage?.(toGroupMessageOutput(userMessageWithSender!));
+      for (const bot of selectedBots) {
+        const saved = await prisma.groupMessage.create({
+          data: {
+            groupId,
+            roundId,
+            senderType: SenderType.BOT,
+            botId: bot.id,
+            content: topicGuard.reply!,
+            status: MessageStatus.SENT,
+          },
+        });
+        const savedWithSender = await prisma.groupMessage.findUnique({
+          where: { id: saved.id },
+          include: GROUP_MESSAGE_SENDER_INCLUDE,
+        });
+        events.botDone?.(toGroupMessageOutput(savedWithSender!));
+      }
+      events.roundDone?.();
+      logger.info(
+        {
+          groupId,
+          roundId,
+          userId,
+          reason: topicGuard.reason,
+          botReplies: selectedBots.length,
+        },
+        'group: stream topic guard blocked, using fixed off-topic replies',
+      );
+      return;
+    }
 
     // 缓存键：群组 + 内容 + 本轮选中 NPC id 顺序（与 sendGroupMessage 完全一致）
     const roundKey = cacheKey([groupId, content, selectedBots.map((b) => b.id).join(',')]);

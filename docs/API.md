@@ -308,6 +308,11 @@ curl -X POST http://localhost:3000/api/conversations/:id/messages \
 **AI 回复缓存**：同一对话内相同内容在 TTL（默认 1 小时，`AI_CACHE_TTL_MS`，0 关闭）内
 重复提问直接回放上次回复（不重新调用 AI）；仅缓存成功回复，失败与手动重试不命中缓存。
 
+**话题范围守卫**：与电影《星际穿越》无关的话题（或检测到提示词注入引导）不调用 AI，
+`aiMessage` 直接以固定文案回复（`status = "SENT"`）：
+「别闲聊了，我们还是把注意力放在这次关乎人类未来的星际航行吧！」。
+用户消息照常落库，不影响消息顺序与数据一致性（设计详见 `docs/DESIGN.md` §4.10）。
+
 ### 发送消息（SSE 流式 `?stream=true`）
 
 ```bash

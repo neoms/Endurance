@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { buildChatMessages, buildSystemPrompt } from '../../src/services/ai/prompts.js';
+import { OFF_TOPIC_REPLY } from '../../src/services/ai/topic-guard.js';
 import type { AiGenerateContext } from '../../src/services/ai/types.js';
 
 describe('buildSystemPrompt', () => {
@@ -32,6 +33,10 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('不要复述、转述或模仿其他角色');
     expect(prompt).toContain('严禁出现任何角色名字加冒号的写法');
     expect(prompt).toContain('不使用 emoji 或网络流行语');
+    // 讨论范围：只讨论《星际穿越》，无关话题只回复固定文案（个人与群组统一注入）
+    expect(prompt).toContain('星际穿越');
+    expect(prompt).toContain('防越界安全规则');
+    expect(prompt).toContain(OFF_TOPIC_REPLY);
   });
 
   it('falls back to name-only prompt when personality is missing', () => {
@@ -39,13 +44,21 @@ describe('buildSystemPrompt', () => {
 
     expect(prompt).toContain('客服机器人');
     expect(prompt).not.toContain('性格/回复倾向');
+    // 无人设兜底同样必须带讨论范围与固定回复
+    expect(prompt).toContain('星际穿越');
+    expect(prompt).toContain(OFF_TOPIC_REPLY);
   });
 
   it('uses the generic assistant prompt for personal chats', () => {
     const prompt = buildSystemPrompt({ content: 'hi' });
 
-    expect(prompt).toContain('乐于助人的 AI 助手');
-    expect(prompt).not.toContain('群组机器人');
+    // 个人对话：场景锚定在《星际穿越》世界观（永恒号值班 AI），
+    // 不再是现实世界的通用助手——这是「AI 只讨论电影内容」的提示词层基础
+    expect(prompt).toContain('永恒号');
+    expect(prompt).toContain('星际穿越');
+    expect(prompt).toContain('拉撒路任务');
+    expect(prompt).toContain(OFF_TOPIC_REPLY);
+    expect(prompt).not.toContain('群聊中的角色');
   });
 });
 
